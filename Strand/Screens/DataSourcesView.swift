@@ -12,23 +12,26 @@ struct DataSourcesView: View {
     var body: some View {
         ScreenScaffold(title: "Data Sources",
                        subtitle: "Everything stays on this Mac. Bring your history in once, then it's yours.") {
+            // Each importer lives on its OWN card. Two `.fileImporter` modifiers on the
+            // same view silently collapse to one in SwiftUI — which is why the WHOOP
+            // button used to do nothing while Apple Health worked (issue #5).
             whoopCard
+                .fileImporter(isPresented: $picking,
+                              allowedContentTypes: [.zip, .folder],
+                              allowsMultipleSelection: false) { result in
+                    if case .success(let urls) = result, let url = urls.first {
+                        model.importWhoop(url: url)
+                    }
+                }
             appleHealthCard
+                .fileImporter(isPresented: $pickingApple,
+                              allowedContentTypes: [.zip, .folder],
+                              allowsMultipleSelection: false) { result in
+                    if case .success(let urls) = result, let url = urls.first {
+                        model.importAppleHealth(url: url)
+                    }
+                }
             liveCard
-        }
-        .fileImporter(isPresented: $picking,
-                      allowedContentTypes: [.zip, .folder],
-                      allowsMultipleSelection: false) { result in
-            if case .success(let urls) = result, let url = urls.first {
-                model.importWhoop(url: url)
-            }
-        }
-        .fileImporter(isPresented: $pickingApple,
-                      allowedContentTypes: [.zip, .folder],
-                      allowsMultipleSelection: false) { result in
-            if case .success(let urls) = result, let url = urls.first {
-                model.importAppleHealth(url: url)
-            }
         }
     }
 
