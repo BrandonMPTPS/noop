@@ -431,12 +431,17 @@ reference or app export needed:
   (`corr(amplitude, |Δgravity|) = +0.35` — mild motion artifact, not the signal) — so it is optical,
   not a ballistocardiographic IMU reading.
 
-**Two optical channels.** Byte `frame[12]` is a channel id: the capture partitions cleanly into two
-40-second bursts, one with `frame[12] == 0x41` and one with `0x46` (no shared timestamps, ~19 min
-apart). *Both* channels' waveforms autocorrelate to the heart rate (lag 14 ≈ 103 bpm), with different DC
-baselines — i.e. two distinct PPG channels (the strap multiplexes green / red / IR LEDs). Which physical
-LED each id maps to is **not** verifiable from the data, so the raw id is surfaced (`ppg_channel`) with
-no colour claim.
+**Time-multiplexed optical channels.** Byte `frame[21]` is the channel index: the strap sweeps **26
+optical channels (values 1…26)**, one per ~40-frame (~39 s) block, revisiting a given channel only
+~20 min later — so a full 1→26 sweep is spread over hours and **no two channels are ever sampled
+simultaneously**. Each channel's waveform autocorrelates to the heart rate (lag 14 ≈ 103 bpm) with its
+own DC baseline. Which physical LED each index maps to is **not** verifiable from the data, so the raw
+index is surfaced (`ppg_channel`, gated to 1…26) with no colour claim. *(An earlier read at `frame[12]`
+— the "two channels `0x41`/`0x46`" — was a high-entropy counter byte mistaken for the channel during a
+short 2-burst capture; verified against a 22 h overnight corpus, `frame[12]` takes 67 distinct values
+while `frame[21]` takes exactly 26. The PPG **sample** decode (LE i16 @[27:75]) is unaffected and
+correct.) This 26-way time-multiplex is also why **SpO₂ is not recoverable offline** — it needs
+*simultaneous* red+IR, and no two channels are ever co-sampled.
 
 The full v26 byte map (88 bytes; CRC32 @84):
 

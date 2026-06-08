@@ -17,6 +17,27 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 1.21 — WHOOP 5.0 historical biometrics + PPG channel fix (Mac)
+
+- **Added (macOS): WHOOP 5.0 type-47 v18 records now decode more biometric fields**, each gated to a
+  physically-real range and cross-validated against real worn-vs-off-wrist frames (the data is the
+  arbiter): **skin temperature@73** (u16/100 °C — ~30.6 °C worn, ~22.5 °C off-wrist, AS6221 thermistor;
+  the raw sensor, not WHOOP's cloud-calibrated summary), **dynamic acceleration@41** (f32 g, gated 0–8),
+  a **cumulative motion/step counter@57**, and **wrist-contact/motion quality@63** (enum 0/1/2). Fields
+  the source report listed but that did **not** decode consistently on this device's firmware
+  (cardiac_flags@33, sleep-state@81, perfusion@69/71) are deliberately left in the raw region pending
+  more captures — so NOOP never ships a guessed offset. These are building blocks toward on-device 5.0
+  sleep/recovery (decode layer only; not yet surfaced in the UI).
+
+- **Fixed (macOS): the WHOOP 5.0 v26 PPG channel index was read from the wrong byte.** A community
+  reverse-engineering report (validated against a 22 h overnight corpus) and NOOP's own two real test
+  fixtures both show the channel is **`frame[21]` (values 1–26, a time-multiplexed sweep)**, not
+  `frame[12]` — the `0x41`/`0x46` that the merged v1.19 decode reported were a high-entropy counter byte
+  caught during a short 2-burst capture. Corrected and gated to 1…26 so a wrong offset stores nothing.
+  The PPG **waveform** decode (LE i16 @[27:75]) was always correct and is unchanged. This 26-way
+  time-multiplex is also why **SpO₂ is not recoverable offline** (it needs simultaneous red+IR; no two
+  channels are ever co-sampled). 117 WhoopProtocol tests green.
+
 ## 1.20 — Strap log stays off the system log (Android)
 
 - **Changed (Android): the strap connection log is no longer mirrored to logcat by default** (PR #45).
