@@ -19,6 +19,11 @@ import Foundation
 struct WorkoutsView: View {
     @EnvironmentObject var repo: Repository
 
+    // Imperial/Metric display preference (D#103). Workout distances are stored in metres; the toggle
+    // re-labels them to miles/yards. Display-only — nothing on disk changes.
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+
     /// All loaded sessions, newest first. Seedable for previews.
     @State private var allRows: [WorkoutRow]
     @State private var loaded: Bool
@@ -200,7 +205,7 @@ struct WorkoutsView: View {
         let totalCount = rows.count
         let totalTimeH = rows.compactMap(\.durationS).reduce(0, +) / 3600.0
         let totalKcal = rows.compactMap(\.energyKcal).reduce(0, +)
-        let totalKm = rows.compactMap(\.distanceM).reduce(0, +) / 1000.0
+        let totalKmRaw = rows.compactMap(\.distanceM).reduce(0, +) / 1000.0
         let modal = modalSport(from: groups)
 
         return LazyVGrid(columns: tileColumns, alignment: .leading, spacing: NoopMetrics.gap) {
@@ -217,7 +222,7 @@ struct WorkoutsView: View {
                      caption: "kcal",
                      accent: StrandPalette.metricAmber)
             StatTile(label: "Total Distance",
-                     value: oneDecimal(totalKm) + " km",
+                     value: UnitFormatter.distanceFromKilometers(totalKmRaw, system: unitSystem),
                      caption: "covered",
                      accent: StrandPalette.metricCyan)
             StatTile(label: "Most Active",
@@ -607,8 +612,7 @@ struct WorkoutsView: View {
 
     private func distanceLabel(_ m: Double?) -> String {
         guard let m, m > 0 else { return "–" }
-        let km = m / 1000.0
-        return km >= 1 ? oneDecimal(km) + "km" : "\(Int(m.rounded()))m"
+        return UnitFormatter.distanceFromMeters(m, system: unitSystem)
     }
 
     private func oneDecimal(_ v: Double) -> String { String(format: "%.1f", v) }

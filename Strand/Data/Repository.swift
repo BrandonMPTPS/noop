@@ -172,14 +172,66 @@ final class Repository: ObservableObject {
         return (try? await store.metricKeys(deviceId: source)) ?? []
     }
 
-    /// Logged behaviours (Whoop journal) for correlation insights.
+    /// Native journal answers live under this dedicated source id. The journal table has no
+    /// `source` column (PK is (deviceId, day, question)), so writing native answers under the
+    /// imported `deviceId` would let a CSV re-import silently overwrite them — and clears could
+    /// then delete imported rows. A separate device id keeps the two streams independent.
+    static let journalDeviceId = "noop-journal"
+
+    /// Logged behaviours (imported WHOOP journal ∪ native noop-journal) for correlation insights.
     func journalEntries(days: Int = 4000) async -> [JournalEntry] {
+        guard let store = await ensureStore() else { return [] }
+        let now = Date()
+        let from = Self.dayString(now.addingTimeInterval(-Double(days) * 86_400))
+        let to = Self.dayString(now.addingTimeInterval(86_400))
+        let imported = (try? await store.journalEntries(deviceId: deviceId, from: from, to: to)) ?? []
+        let native = (try? await store.journalEntries(deviceId: Self.journalDeviceId,
+                                                      from: from, to: to)) ?? []
+        return Self.mergeJournal(imported: imported, native: native)
+    }
+
+    /// Imported journal rows only (used by the logging card to adopt the export's exact question
+    /// strings into the catalog, so logged and imported days group under one behaviour).
+    func importedJournalEntries(days: Int = 4000) async -> [JournalEntry] {
         guard let store = await ensureStore() else { return [] }
         let now = Date()
         return (try? await store.journalEntries(
             deviceId: deviceId,
             from: Self.dayString(now.addingTimeInterval(-Double(days) * 86_400)),
             to: Self.dayString(now.addingTimeInterval(86_400)))) ?? []
+    }
+
+    /// One day's native answers (question → answeredYes) for the logging card's chip state. A
+    /// targeted read — the merged list carries no deviceId, so it can't distinguish native rows.
+    func nativeJournalAnswers(day: String) async -> [String: Bool] {
+        guard let store = await ensureStore() else { return [:] }
+        let rows = (try? await store.journalEntries(deviceId: Self.journalDeviceId,
+                                                    from: day, to: day)) ?? []
+        return Dictionary(rows.map { ($0.question, $0.answeredYes) },
+                          uniquingKeysWith: { _, last in last })
+    }
+
+    /// Union; the NATIVE row wins per (day, question) — the in-app answer is the user's most recent
+    /// explicit action and stays editable, unlike the immutable imported history.
+    static func mergeJournal(imported: [JournalEntry], native: [JournalEntry]) -> [JournalEntry] {
+        var byKey: [String: JournalEntry] = [:]
+        for e in imported { byKey[e.day + "\u{1F}" + e.question] = e }
+        for e in native { byKey[e.day + "\u{1F}" + e.question] = e }
+        return byKey.values.sorted { ($0.day, $0.question) < ($1.day, $1.question) }
+    }
+
+    /// Write one native answer (day per the importer's wake-day convention).
+    func saveJournalAnswer(day: String, question: String, answeredYes: Bool, notes: String? = nil) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.upsertJournal(
+            [JournalEntry(day: day, question: question, answeredYes: answeredYes, notes: notes)],
+            deviceId: Self.journalDeviceId)
+    }
+
+    /// Clear one native answer (never touches imported rows — scoped to the dedicated source id).
+    func clearJournalAnswer(day: String, question: String) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.deleteJournal(deviceId: Self.journalDeviceId, day: day, question: question)
     }
 
     /// All workouts (Whoop + Apple Health + on-device detected bouts), newest first.

@@ -225,6 +225,14 @@ interface WhoopDao {
     suspend fun journal(deviceId: String, from: String, to: String): List<JournalEntry>
 
     /**
+     * Delete one journal answer by natural key (the native logging card's "clear"). Source-scoped
+     * by deviceId, so clearing a native ("noop-journal") answer never removes an identical imported
+     * row. Port of JournalWorkoutAppleCache.swift deleteJournal(deviceId:day:question:).
+     */
+    @Query("DELETE FROM journal WHERE deviceId = :deviceId AND day = :day AND question = :question")
+    suspend fun deleteJournalEntry(deviceId: String, day: String, question: String)
+
+    /**
      * Workouts whose startTs falls in [from, to] (unix seconds), oldest first, row-limited.
      * Port of JournalWorkoutAppleCache.swift workouts(deviceId:from:to:limit:).
      */

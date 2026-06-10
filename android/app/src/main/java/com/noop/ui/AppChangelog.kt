@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "1.79"
+    const val CURRENT_VERSION = "1.80"
 
     data class Release(
         val version: String,
@@ -36,6 +36,15 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "1.80",
+            title = "Journal logging + an Imperial/Metric units toggle",
+            date = "June 2026",
+            items = listOf(
+                "New (Mac and Android): log how you're living — a journal card on the Insights screen with quick yes/no chips for behaviours (caffeine, alcohol, a late meal, screen time, and your own custom questions). Your entries stay on-device and are never overwritten by an import.",
+                "New (Mac and Android): an Imperial / Metric units toggle in Settings — distance (km / mi), weight (kg / lb), height (cm / ft-in) and temperature (°C / °F), with a separate temperature override. Everything stays stored the same; this only changes how it's shown.",
+            ),
+        ),
         Release(
             version = "1.79",
             title = "Manual workouts, edit/dismiss auto-detected ones, and CSV export",

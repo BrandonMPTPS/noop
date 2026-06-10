@@ -195,6 +195,15 @@ private struct HeartRateSection: View {
 private struct VitalsSection: View {
     @EnvironmentObject var repo: Repository
 
+    // Temperature display preference (D#103). Skin temp is stored in °C (absolute or a ±deviation); the
+    // toggle re-labels it to °F. Display-only — banding still runs on the stored °C value.
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
+    private var temperatureUnit: TemperatureUnit {
+        let system = UnitSystem(rawValue: unitSystemRaw) ?? .metric
+        return UnitPrefs.resolveTemperature(system: system, override: temperatureRaw)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Vital Signs", overline: "Today", trailing: vitalsAsOf)
@@ -245,15 +254,27 @@ private struct VitalsSection: View {
         // config + population fallback (±0.6 °C mirrors the illness watch's flag threshold).
         let skin = d?.skinTempDevC
         let skinResult: VitalBands.Result
+        // Track which kind the displayed value is so the temperature converter applies the right rule:
+        // an ABSOLUTE reading uses the full C→F formula (×9/5 + 32); a ±DEVIATION must omit the offset.
+        let skinIsAbsolute = skin.map(VitalBands.isAbsoluteSkinTemp) ?? true
         if let skin {
-            let absolute = VitalBands.isAbsoluteSkinTemp(skin)
             skinResult = VitalBands.band(
                 value: skin,
                 history: VitalBands.skinTempHistory(matching: skin, in: series { $0.skinTempDevC }),
-                populationRange: absolute ? 33...36 : (-0.6)...0.6,
-                cfg: absolute ? Baselines.metricCfg["skin_temp"]! : VitalBands.skinTempDeviationCfg)
+                populationRange: skinIsAbsolute ? 33...36 : (-0.6)...0.6,
+                cfg: skinIsAbsolute ? Baselines.metricCfg["skin_temp"]! : VitalBands.skinTempDeviationCfg)
         } else {
             skinResult = VitalBands.Result(band: .noData, basis: .population, nights: 0)
+        }
+        // Resolve the skin-temp label + converter once, honouring the °C/°F preference.
+        let tempUnit = temperatureUnit
+        let skinUnitLabel = UnitFormatter.temperatureUnit(tempUnit)
+        let skinFormat: (Double) -> String = { c in
+            // Strip the trailing " °C/°F" the formatter adds — `Vital.formattedValue` appends `unit`.
+            let full = skinIsAbsolute
+                ? UnitFormatter.temperatureFromCelsius(c, unit: tempUnit, decimals: 1)
+                : UnitFormatter.temperatureDeltaFromCelsius(c, unit: tempUnit, decimals: 1)
+            return full.replacingOccurrences(of: " " + skinUnitLabel, with: "")
         }
         return [
             Vital(key: "resp", label: "Resp Rate", unit: "rpm",
@@ -279,8 +300,8 @@ private struct VitalsSection: View {
                   banding: VitalBands.band(value: d?.avgHrv, history: series { $0.avgHrv },
                                            populationRange: 40...120, cfg: Baselines.hrvCfg),
                   metricColor: StrandPalette.metricPurple),
-            Vital(key: "skin", label: "Skin Temp", unit: "°C",
-                  value: skin, format: { String(format: "%.1f", $0) },
+            Vital(key: "skin", label: "Skin Temp", unit: skinUnitLabel,
+                  value: skin, format: skinFormat,
                   banding: skinResult, metricColor: StrandPalette.metricAmber),
         ]
     }

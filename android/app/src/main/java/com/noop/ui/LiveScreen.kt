@@ -36,6 +36,7 @@ import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -64,6 +65,10 @@ fun LiveScreen(viewModel: AppViewModel) {
     val selectedModel by viewModel.selectedModel.collectAsStateWithLifecycle()
     val activeWorkout by viewModel.activeWorkout.collectAsStateWithLifecycle()
     val lastWorkout by viewModel.lastWorkout.collectAsStateWithLifecycle()
+
+    // Imperial/Metric display preference (D#103). Live distance/pace are computed from metres + sec/km
+    // and re-labelled here. Display-only.
+    val unitSystem = UnitPrefs.system(LocalContext.current)
 
     // The runtime Bluetooth permission gates scanning. If it isn't granted, the Connect button
     // REQUESTS it (rather than silently doing nothing), then connects once allowed. Shared with
@@ -293,8 +298,8 @@ fun LiveScreen(viewModel: AppViewModel) {
                     }
                     if (w.gpsEnabled) {
                         Row(horizontalArrangement = Arrangement.spacedBy(Metrics.gap)) {
-                            StatTile(modifier = Modifier.weight(1f), label = "Distance", value = String.format("%.2f km", w.distanceM / 1000.0))
-                            StatTile(modifier = Modifier.weight(1f), label = "Pace", value = w.paceSecPerKm?.let { String.format("%d:%02d /km", (it / 60).toInt(), (it % 60).toInt()) } ?: "—")
+                            StatTile(modifier = Modifier.weight(1f), label = "Distance", value = liveDistance(w.distanceM, unitSystem))
+                            StatTile(modifier = Modifier.weight(1f), label = "Pace", value = w.paceSecPerKm?.let { livePace(it, unitSystem) } ?: "—")
                         }
                     }
                     Button(
@@ -322,7 +327,7 @@ fun LiveScreen(viewModel: AppViewModel) {
                 val mins = ((row.durationS ?: 0.0) / 60).toInt()
                 val parts = listOfNotNull(
                     "$mins min",
-                    row.distanceM?.let { String.format("%.2f km", it / 1000.0) },
+                    row.distanceM?.let { liveDistance(it, unitSystem) },
                     row.avgHr?.let { "$it avg bpm" },
                     row.strain?.let { String.format("strain %.1f", it) },
                 )
@@ -541,4 +546,19 @@ internal fun relativeAgo(epochSec: Long, nowSec: Long = System.currentTimeMillis
         d < 86_400L -> "${d / 3600L} h ago"
         else -> "${d / 86_400L} d ago"
     }
+}
+
+/** Live workout distance from metres, 2-decimal precision, re-labelled to the active system (km / mi). */
+private fun liveDistance(distanceM: Double, system: UnitSystem): String = when (system) {
+    UnitSystem.METRIC -> java.lang.String.format(java.util.Locale.US, "%.2f km", distanceM / 1000.0)
+    UnitSystem.IMPERIAL ->
+        java.lang.String.format(java.util.Locale.US, "%.2f mi", UnitFormatter.kmToMiles(distanceM / 1000.0))
+}
+
+/** Live pace from seconds-per-km, re-labelled to minutes per km / per mile. A per-mile pace is per-km
+ *  divided by miles-per-km (a mile is longer, so the time per unit is larger). */
+private fun livePace(secPerKm: Double, system: UnitSystem): String {
+    val sec = if (system == UnitSystem.IMPERIAL) secPerKm / UnitFormatter.MILES_PER_KILOMETER else secPerKm
+    val unit = if (system == UnitSystem.IMPERIAL) "/mi" else "/km"
+    return java.lang.String.format(java.util.Locale.US, "%d:%02d %s", (sec / 60).toInt(), (sec % 60).toInt(), unit)
 }

@@ -51,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -228,6 +229,9 @@ private fun SummarySection(
     effectiveRange: WorkoutRange,
     groups: List<SportGroup>,
 ) {
+    // Imperial/Metric display preference (D#103). Distances are stored in metres; the toggle re-labels
+    // them. Read here so a change recomposes the tiles. Display-only — nothing stored changes.
+    val unitSystem = UnitPrefs.system(LocalContext.current)
     val totalCount = rows.size
     val totalTimeH = rows.mapNotNull { it.durationS }.sum() / 3600.0
     val totalKcal = rows.mapNotNull { it.energyKcal }.sum()
@@ -266,7 +270,7 @@ private fun SummarySection(
             StatTile(
                 modifier = m,
                 label = "Total Distance",
-                value = oneDecimal(totalKm) + " km",
+                value = UnitFormatter.distanceFromKilometers(totalKm, unitSystem),
                 caption = "covered",
                 accent = Palette.metricCyan,
             )

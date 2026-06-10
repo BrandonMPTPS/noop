@@ -17,6 +17,16 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 1.80 — Journal logging + an Imperial/Metric units toggle
+
+- **New (Mac and Android):** a journal card on Insights — quick yes/no chips for behaviours (caffeine,
+  alcohol, a late meal, screen time, and your own custom questions) so you can see what moves your
+  recovery. Entries stay on-device and are never overwritten by an import.
+- **New (Mac and Android):** an Imperial / Metric units toggle in Settings — distance, weight, height
+  and temperature, with a separate temperature override. Display-only; stored data is unchanged.
+
+---
+
 ## 1.79 — Manual workouts, edit/dismiss auto-detected ones, and CSV export
 
 - **New (Mac and Android):** add a workout by hand, and edit, re-label, or **dismiss** the ones NOOP

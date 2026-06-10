@@ -143,6 +143,23 @@ object NoopPrefs {
         of(context).edit().putBoolean(KEY_DEBUG_LOGGING, enabled).apply()
     }
 
+    /** Imperial/Metric display preference (D#103). Display-only — stored data stays SI. The length/mass
+     *  system is read by [UnitPrefs.system]; the temperature override (empty = "match the system") by
+     *  [UnitPrefs.temperature]. Mirrors macOS @AppStorage("units.system" / "units.temperature"). */
+    const val KEY_UNIT_SYSTEM = "units.system"
+    const val KEY_TEMPERATURE_UNIT = "units.temperature"
+
+    fun setUnitSystem(context: Context, system: UnitSystem) {
+        of(context).edit().putString(KEY_UNIT_SYSTEM, system.raw).apply()
+    }
+
+    /** Persist the temperature override, or pass null to clear it back to "match the system". */
+    fun setTemperatureUnit(context: Context, unit: TemperatureUnit?) {
+        of(context).edit().apply {
+            if (unit == null) remove(KEY_TEMPERATURE_UNIT) else putString(KEY_TEMPERATURE_UNIT, unit.raw)
+        }.apply()
+    }
+
     /** Health Connect periodic auto-sync (Samsung Health → Health Connect → NOOP). Default OFF.
      *  Interval in hours (default 12). Last successful sync as epoch millis (0 = never). */
     const val KEY_HC_AUTO_SYNC = "noop.hcAutoSync"

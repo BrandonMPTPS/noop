@@ -254,7 +254,10 @@ private fun FooterStat(label: String, value: String, modifier: Modifier = Modifi
 
 @Composable
 private fun VitalsSection(today: DailyMetric?, days: List<DailyMetric>) {
-    val vitals = vitalsFor(today, days)
+    // Temperature display preference (D#103). Skin temp is stored in °C; the toggle re-labels it to °F.
+    // Display-only — banding still runs on the stored °C value.
+    val tempUnit = UnitPrefs.temperature(LocalContext.current)
+    val vitals = vitalsFor(today, days, tempUnit)
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
         SectionHeader(
             title = "Vital Signs",
@@ -336,7 +339,11 @@ private data class Vital(
 
 /** Build the vitals, banded against the user's OWN trailing baseline once 14 trusted
  *  nights exist (population ranges before that — VitalBands does the deciding). */
-private fun vitalsFor(d: DailyMetric?, days: List<DailyMetric>): List<Vital> {
+private fun vitalsFor(
+    d: DailyMetric?,
+    days: List<DailyMetric>,
+    tempUnit: TemperatureUnit = TemperatureUnit.CELSIUS,
+): List<Vital> {
     val todayKey = d?.day
     // History strictly before the displayed day, oldest→newest (recentDays is already
     // oldest→newest); calendar-padded so wear gaps count as missing nights (a stale
@@ -351,16 +358,29 @@ private fun vitalsFor(d: DailyMetric?, days: List<DailyMetric>): List<Vital> {
     // This also fixes the live bug where a strap-computed +0.2 °C deviation read
     // "Out of range" against the 33–36 absolute band.
     val skin = d?.skinTempDevC
+    // Track which kind the value is so the temperature converter picks the right rule: an ABSOLUTE
+    // reading uses the full C→F formula (×9/5 + 32); a ±DEVIATION must omit the offset.
+    val skinIsAbsolute = skin?.let { VitalBands.isAbsoluteSkinTemp(it) } ?: true
     val skinResult: VitalBands.Result = if (skin == null) {
         VitalBands.Result(VitalBands.Band.NO_DATA, VitalBands.Basis.POPULATION, 0)
     } else {
-        val absolute = VitalBands.isAbsoluteSkinTemp(skin)
         VitalBands.band(
             value = skin,
             history = VitalBands.skinTempHistory(skin, series { it.skinTempDevC }),
-            populationRange = if (absolute) 33.0..36.0 else -0.6..0.6,
-            cfg = if (absolute) Baselines.metricCfg.getValue("skin_temp") else VitalBands.skinTempDeviationCfg,
+            populationRange = if (skinIsAbsolute) 33.0..36.0 else -0.6..0.6,
+            cfg = if (skinIsAbsolute) Baselines.metricCfg.getValue("skin_temp") else VitalBands.skinTempDeviationCfg,
         )
+    }
+    // Resolve the skin-temp label + converter once, honouring the °C/°F preference. `Vital.formattedValue`
+    // appends `unit`, so strip the trailing " °C/°F" the formatter adds.
+    val skinUnitLabel = UnitFormatter.temperatureUnit(tempUnit)
+    val skinFormat: (Double) -> String = { c ->
+        val full = if (skinIsAbsolute) {
+            UnitFormatter.temperatureFromCelsius(c, tempUnit, decimals = 1)
+        } else {
+            UnitFormatter.temperatureDeltaFromCelsius(c, tempUnit, decimals = 1)
+        }
+        full.removeSuffix(" $skinUnitLabel")
     }
     return listOf(
         Vital(
@@ -393,8 +413,8 @@ private fun vitalsFor(d: DailyMetric?, days: List<DailyMetric>): List<Vital> {
             metricColor = Palette.metricPurple,
         ),
         Vital(
-            key = "skin", label = "Skin Temp", unit = "°C",
-            value = skin, format = { String.format("%.1f", it) },
+            key = "skin", label = "Skin Temp", unit = skinUnitLabel,
+            value = skin, format = skinFormat,
             banding = skinResult, metricColor = Palette.metricAmber,
         ),
     )
