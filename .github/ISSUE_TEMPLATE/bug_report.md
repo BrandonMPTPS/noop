@@ -15,9 +15,10 @@ email, or a raw export — none of it is needed to reproduce a bug.
 > not working" reports turn out to be a setup or usage detail rather than a fault in NOOP, and the log
 > is the only way to tell which. Issues with no log (and no obvious repro) may be closed asking for one.
 >
-> **How to get a strap log:** turn on **Settings → Strap → Debug logging**, reproduce the problem,
-> then **Settings → Strap → Share strap log** (macOS: **Settings → Support → Share strap log**).
-> Redact anything you'd rather not share — partial logs are still useful.
+> **How to get a strap log:** connect to your strap and reproduce the problem first, then grab the log —
+> **Android:** **Settings → Strap → "Share strap log (for bug reports)"**;
+> **macOS:** open the **Live** screen and use the **Strap log** card → **Copy** (or **Save…**).
+> Paste or attach it below. Redact anything you'd rather not share — partial logs are still useful.
 
 ## What happens
 
@@ -35,7 +36,7 @@ What you expected to happen instead.
 
 ## Environment
 
-- NOOP version (Settings → About, or the release tag):
+- NOOP version (Settings → What's new, or the release tag):
 - Platform: macOS / Android — and its version:
 - WHOOP strap model: 4.0 / 5.0 / MG / not using a strap (imported data only):
 - Data source: live BLE / WHOOP CSV import / Apple Health import:
