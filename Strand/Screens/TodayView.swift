@@ -904,7 +904,12 @@ struct TodayView: View {
         case .steps:
             StatTile(
                 label: "Steps",
-                value: aLatest?.steps.map { intString(Double($0)) } ?? latestString("steps", decimals: 0),
+                // Prefer the strap's own on-device @57 step counter (DailyMetric.steps, WHOOP 5/MG);
+                // fall back to Apple Health steps for the day only when the strap supplied none (e.g.
+                // a WHOOP 4.0, which doesn't expose steps over BLE). Mirrors Android (#276/#150).
+                value: (d?.steps).map { intString(Double($0)) }
+                    ?? aLatest?.steps.map { intString(Double($0)) }
+                    ?? latestString("steps", decimals: 0),
                 caption: "today",
                 accent: StrandPalette.metricCyan,
                 sparkline: sparks["steps"],
@@ -1108,6 +1113,11 @@ struct TodayView: View {
         // 14-day sparklines — Apple Health.
         sparks["resp_rate"]   = await sparkValues("resp_rate", source: "apple-health", window: 14)
         sparks["steps"]       = await sparkValues("steps", source: "apple-health", window: 14)
+        // Steps prefer the strap's own @57 daily total (no metricSeries — it lives on the daily row),
+        // so a strap-only WHOOP 5/MG user gets a steps trend without Apple Health. Falls back to the
+        // Apple Health series above when the strap supplied no steps (#276).
+        let strapSteps = repo.days.suffix(14).compactMap { $0.steps.map(Double.init) }
+        if !strapSteps.isEmpty { sparks["steps"] = strapSteps }
         sparks["weight"]      = await sparkValues("weight", source: "apple-health", window: 90)
         sparks["active_kcal"] = await sparkValues("active_kcal", source: "apple-health", window: 14)
 
