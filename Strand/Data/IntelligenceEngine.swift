@@ -115,6 +115,15 @@ final class IntelligenceEngine: ObservableObject {
         var nightlyRespByDay: [String: Double?] = [:]
         var nightlySkinByDay: [String: Double?] = [:]
 
+        // Device-registry snapshot for per-day owner resolution (invariant I2 — a day's scores come from
+        // exactly ONE source). Read once before the loop: the paired-device list + the active id are
+        // stable for the run. With only the seeded 'my-whoop' row paired (the default and every
+        // single-WHOOP install) the active strap is `deviceId`, so `resolveDayOwner` below returns
+        // `deviceId` for every day and the per-day reads are byte-identical to the pre-I2 behaviour.
+        let registry = DeviceRegistryStore(dbQueue: store.registryQueue)
+        let regDevices = (try? registry.all()) ?? []
+        let regActiveId = (try? registry.activeDeviceId()) ?? deviceId
+
         // Floor `now` to LOCAL midnight (#277) so each `dayStart` lands on a local-day boundary and the
         // day keys are LOCAL calendar days, consistent with the dashboard's local "today" lookup. A
         // west-of-UTC user's evening crosses midnight UTC; bucketing by UTC put it in the next UTC day,
@@ -127,13 +136,21 @@ final class IntelligenceEngine: ObservableObject {
             let from = dayStart - 30 * 3_600
             let to = dayStart + 12 * 3_600
 
-            let hr = (try? await store.hrSamples(deviceId: deviceId, from: from, to: to, limit: 200_000)) ?? []
+            // I2: pick the single device that owns this day, and read ITS streams below. With one device
+            // this resolves to `deviceId` (active strap, has data → priority 0), so nothing changes; with
+            // multiple sources the day is scored from exactly one (active strap > other live straps >
+            // imports, or a locked override). Falls back to `deviceId` if the registry is unreadable.
+            let owner = await resolveDayOwner(day: day, from: from, to: to, store: store,
+                                              devices: regDevices, activeId: regActiveId,
+                                              registry: registry)
+
+            let hr = (try? await store.hrSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
             guard hr.count >= 200 else { continue }   // need real raw data, not a stray sample
-            let rr = (try? await store.rrIntervals(deviceId: deviceId, from: from, to: to, limit: 200_000)) ?? []
-            let resp = (try? await store.respSamples(deviceId: deviceId, from: from, to: to, limit: 200_000)) ?? []
-            let grav = (try? await store.gravitySamples(deviceId: deviceId, from: from, to: to, limit: 200_000)) ?? []
-            let steps = (try? await store.stepSamples(deviceId: deviceId, from: from, to: to, limit: 200_000)) ?? []
-            let skin = (try? await store.skinTempSamples(deviceId: deviceId, from: from, to: to, limit: 200_000)) ?? []
+            let rr = (try? await store.rrIntervals(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
+            let resp = (try? await store.respSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
+            let grav = (try? await store.gravitySamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
+            let steps = (try? await store.stepSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
+            let skin = (try? await store.skinTempSamples(deviceId: owner, from: from, to: to, limit: 200_000)) ?? []
 
             // Calendar-day window for the ADDITIVE daily totals (steps + calories). The night window
             // above is anchored to the current time-of-day and ends at dayStart+12h, so for a PAST
@@ -144,8 +161,10 @@ final class IntelligenceEngine: ObservableObject {
             // at -1 s). (#277 — local-day bucketing.)
             let dayMid = Self.midnightLocal(dayStart, offsetSec: tzOffset)
             let dayEnd = dayMid + 86_400 - 1
-            let dayHr = (try? await store.hrSamples(deviceId: deviceId, from: dayMid, to: dayEnd, limit: 200_000)) ?? []
-            let daySteps = (try? await store.stepSamples(deviceId: deviceId, from: dayMid, to: dayEnd, limit: 200_000)) ?? []
+            // Same `owner` as the night window above (I2): the additive day totals must come from the
+            // one device that owns the day, never a mix.
+            let dayHr = (try? await store.hrSamples(deviceId: owner, from: dayMid, to: dayEnd, limit: 200_000)) ?? []
+            let daySteps = (try? await store.stepSamples(deviceId: owner, from: dayMid, to: dayEnd, limit: 200_000)) ?? []
 
             let res = await Task.detached(priority: .utility) {
                 AnalyticsEngine.analyzeDay(day: day, hr: hr, rr: rr, resp: resp, gravity: grav,
@@ -310,6 +329,39 @@ final class IntelligenceEngine: ObservableObject {
 
         // Reload the dashboard caches so the freshly computed scores show up immediately.
         if !dailies.isEmpty { await repo.refresh() }
+    }
+
+    /// Resolve the SINGLE device that owns `day` (invariant I2), so the day is scored from exactly one
+    /// source — never a mix. Builds one `DayOwnerResolver.Candidate` per non-archived device with a
+    /// priority (0 = the active strap, 1 = other live straps, 2 = imports; lower wins) and a CHEAP
+    /// per-day presence flag (one `LIMIT 1` HR read per device), then applies any locked override from
+    /// the dayOwnership table. Returns `deviceId` when the registry yields no owner (no candidate has
+    /// data, or it's empty/unreadable) so the legacy single-source path is preserved.
+    ///
+    /// Single-device install: the only paired row is the seeded active 'my-whoop' (== `deviceId`). Its
+    /// candidate is priority 0 with `hasData == true` for any day the strap collected HR, so the
+    /// resolver returns `deviceId` and the caller's reads are byte-identical to the pre-I2 code. The
+    /// presence check is the same `LIMIT 1` over the same window the caller already reads.
+    private func resolveDayOwner(day: String, from: Int, to: Int, store: WhoopStore,
+                                 devices: [PairedDevice], activeId: String,
+                                 registry: DeviceRegistryStore) async -> String {
+        // A locked override wins outright and skips the presence checks entirely.
+        if let locked = (try? registry.dayOwner(day))?.deviceId {
+            return locked
+        }
+        // No registry rows (shouldn't happen — v15 seeds one — but be safe): keep the legacy id.
+        guard !devices.isEmpty else { return deviceId }
+
+        var candidates: [DayOwnerResolver.Candidate] = []
+        for d in devices where d.status != .archived {
+            let isImport = d.sourceKind == .cloudImport || d.sourceKind == .fileImport
+            let priority = d.id == activeId ? 0 : (isImport ? 2 : 1)
+            // Cheap presence check: a single HR row for this device in the night window is enough to
+            // mark it a candidate. (LIMIT 1 — not the full pull the caller does once an owner is chosen.)
+            let hasData = !((try? await store.hrSamples(deviceId: d.id, from: from, to: to, limit: 1)) ?? []).isEmpty
+            candidates.append(DayOwnerResolver.Candidate(deviceId: d.id, priority: priority, hasData: hasData))
+        }
+        return DayOwnerResolver.resolve(day: day, lockedOwner: nil, candidates: candidates) ?? deviceId
     }
 
     /// #137: re-score under-sampled manual workouts. A `manual` workout is scored from the live HR
