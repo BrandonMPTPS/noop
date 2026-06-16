@@ -17,6 +17,10 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 4.2.8 — Double-tap to log a sleep mark (iPhone & Mac, experimental)
+
+- A new double-tap action: **"Log a sleep mark."** Set it under **Settings → Automations** (the strap double-tap action), and a double-tap on your band writes a timestamped `Sleep mark @ 23:42` line into your strap log — with a single confirming buzz — so you can mark bedtime, wake, or a mid-night wake with no screenshots and nothing to remember. The marks ride along in your shareable strap log. This is **Phase 1** (just capturing the marks) — the foundation for tap-driven sleep bounds and personal sleep-stage calibration down the line. Thanks @maddognik for the idea (#461). *(iPhone & Mac first; Android to follow — its strap double-tap doesn't yet have a configurable action.)*
+
 ## 4.2.7 — Start a workout from the Workouts screen (iPhone & Mac)
 
 - You can now **start a live workout straight from the Workouts screen** (reached from the centre "+" quick-action or the Workouts tab), not only from the Live screen. A prominent **Start Workout** button begins the session and opens the in-exercise view right away; if one's already running it becomes **View active workout**. This is where people instinctively look for it. Thanks @subscriptiondestroyer (#459). *(iPhone & Mac catching up — Android already had a start control on its Workouts screen.)*

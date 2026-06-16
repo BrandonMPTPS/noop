@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "4.2.7"
+    static let currentVersion = "4.2.8"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,13 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "4.2.8",
+            title: "Double-tap to log a sleep mark",
+            date: "June 2026",
+            items: [
+                "**A new double-tap action: \"Log a sleep mark.\"** Set it in Settings → Automations, and a double-tap on your strap writes a timestamped \"Sleep mark @ 23:42\" into your strap log with a confirming buzz — mark bedtime, wake, or a mid-night wake with no screenshots and nothing to remember. It's Phase 1 (capturing the marks); tap-driven sleep bounds + personal calibration build on it. Thanks @maddognik (#461).",
+            ]),
         Release(
             version: "4.2.7",
             title: "Start a workout from the Workouts screen",

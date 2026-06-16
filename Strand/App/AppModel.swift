@@ -61,6 +61,12 @@ final class AppModel: ObservableObject {
     /// Timestamps of moments marked via a double-tap (persisted).
     @Published var moments: [Date] = []
 
+    /// Timestamps of "sleep marks" tapped on the strap (#461) — bedtime / wake / mid-night marks the
+    /// user double-taps without screenshots or remembering the time. Persisted; each also writes a
+    /// greppable "Sleep mark @ HH:mm" line into the strap log. Phase-1 foundation for tap-driven sleep
+    /// bounds + personal sleep-stage calibration.
+    @Published var sleepMarks: [Date] = []
+
     /// An in-progress manually-tracked workout (requested by users who want to start a session
     /// themselves rather than rely on auto-detection). Holds the start time + the live HR collected
     /// since; on End the window is scored via `StrainScorer` and saved as a `WorkoutRow` (source
@@ -190,6 +196,8 @@ final class AppModel: ObservableObject {
             .store(in: &hrCancellables)
 
         moments = (UserDefaults.standard.array(forKey: "moments") as? [Double] ?? [])
+            .map { Date(timeIntervalSince1970: $0) }
+        sleepMarks = (UserDefaults.standard.array(forKey: "sleepMarks") as? [Double] ?? [])
             .map { Date(timeIntervalSince1970: $0) }
 
         AppModel.shared = self   // publish for App Intents (Shortcuts) — see the static above (#42)
@@ -525,6 +533,7 @@ final class AppModel: ObservableObject {
             }
         case .buzzBack: buzz(loops: 1)
         case .markMoment: markMoment()
+        case .sleepMark: markSleep()
         case .runShortcut: MacActions.runShortcut(shortcut)
         }
     }
@@ -540,6 +549,22 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(moments.map(\.timeIntervalSince1970), forKey: "moments")
         buzz(loops: 1)
         live.append(log: "Moment marked")
+    }
+
+    /// #461: record a "sleep mark" — a bedtime / wake / mid-night tap. Stored like moments (survives
+    /// relaunch) and written as a distinct, greppable "Sleep mark @ HH:mm" line into the strap log so it
+    /// rides along in the shared log / raw export. A single buzz confirms it registered. No start/end
+    /// smarts yet (Phase 1): marks are logged in sequence; pairing into sleep bounds comes later.
+    func markSleep() { markSleep(at: Date()) }
+    func markSleep(at date: Date) {
+        sleepMarks.append(date)
+        if sleepMarks.count > 500 { sleepMarks.removeFirst(sleepMarks.count - 500) }
+        UserDefaults.standard.set(sleepMarks.map(\.timeIntervalSince1970), forKey: "sleepMarks")
+        buzz(loops: 1)
+        let hhmm = DateFormatter()
+        hhmm.locale = Locale(identifier: "en_US_POSIX")
+        hhmm.dateFormat = "HH:mm"
+        live.append(log: "Sleep mark @ \(hhmm.string(from: date))")
     }
 
     private func handleWristChange(_ worn: Bool) {
