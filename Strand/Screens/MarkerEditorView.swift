@@ -65,7 +65,10 @@ struct MarkerEditorView: View {
         #if os(iOS)
         .presentationDragIndicator(.visible)
         #else
-        .frame(minWidth: 480, minHeight: 600)
+        // A FIXED frame (not minWidth/minHeight): a macOS sheet hosting a ScrollView needs a definite
+        // height, otherwise the scaffold's height stays ambiguous and every row collapses to the top,
+        // rendering the title/fields/catalog on top of each other. Matches the other editor sheets.
+        .frame(width: 520, height: 720)
         #endif
         .background(StrandPalette.surfaceBase)
         .keyboardDoneToolbar($focused)
