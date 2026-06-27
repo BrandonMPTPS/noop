@@ -2,6 +2,7 @@ package com.noop.ble
 
 import com.noop.data.InsertCounts
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,5 +56,62 @@ class BackfillerSessionTallyTest {
             "Backfill: session persisted 872 rows (172 with motion, 0 skin-temp) across 1 night(s).",
             Backfiller.sessionSummaryLine(872, 172, 0, 1),
         )
+    }
+
+    // #783: trim=0xFFFFFFFF on a fresh run that banked NOTHING means "no banked history": the genuine
+    // clock/charge guidance with the "fully charge it" hint.
+    @Test fun noCursorLineNoRowsGivesNoHistoryGuidance() {
+        val line = Backfiller.noCursorLine(0)
+        assertTrue(line.contains("no banked history to offload"))
+        assertTrue(line.contains("fully charge"))
+    }
+
+    // #783: trim=0xFFFFFFFF AFTER the auto-continuation has already persisted rows means "caught up",
+    // NOT "no history". It must NOT emit the scary fully-charge guidance.
+    @Test fun noCursorLineAfterRowsGivesCaughtUpLine() {
+        val line = Backfiller.noCursorLine(240)
+        assertTrue(line.contains("reached the end of available history"))
+        assertTrue(line.contains("240 row(s)"))
+        assertFalse(line.contains("no banked history"))
+        assertFalse(line.contains("fully charge"))
+    }
+
+    // No em-dash leaks into either branch (project hard rule).
+    @Test fun noCursorLineHasNoEmDash() {
+        assertFalse(Backfiller.noCursorLine(0).contains("\u2014"))
+        assertFalse(Backfiller.noCursorLine(5).contains("\u2014"))
+    }
+
+    // ---- #773 corrupt future-RTC detection ----
+
+    // A genuine offload is PAST-dated; a past timestamp is never flagged.
+    @Test fun futureRtcNotFlaggedForPastDate() {
+        val now = 1_700_000_000L
+        assertFalse(Backfiller.isCorruptFutureRtc(now - 86_400L, now))
+        assertFalse(Backfiller.isCorruptFutureRtc(now, now))
+    }
+
+    // Ordinary forward skew under the 1-day tolerance is NOT a corrupt clock (no false alarm).
+    @Test fun futureRtcToleratesSmallSkew() {
+        val now = 1_700_000_000L
+        assertFalse(Backfiller.isCorruptFutureRtc(now + 3_600L, now))
+        // Exactly at the tolerance boundary is still OK (strictly greater trips it).
+        assertFalse(Backfiller.isCorruptFutureRtc(now + Backfiller.FUTURE_RTC_TOLERANCE_SECONDS, now))
+    }
+
+    // A date days into the future can only be a corrupt strap RTC, so it's flagged.
+    @Test fun futureRtcFlaggedForFarFutureDate() {
+        val now = 1_700_000_000L
+        assertTrue(Backfiller.isCorruptFutureRtc(now + 10L * 86_400L, now))
+    }
+
+    // The recovery hint names the cause + fix, reports days-ahead, and has no em-dash. Byte-identical to Swift.
+    @Test fun futureRtcLineWording() {
+        val now = 1_700_000_000L
+        val line = Backfiller.futureRtcLine(now + 10L * 86_400L, now)
+        assertTrue(line.contains("10 day(s) in the FUTURE"))
+        assertTrue(line.contains("clock (RTC) is corrupt"))
+        assertTrue(line.contains("Fully charge"))
+        assertFalse(line.contains("\u2014"))
     }
 }

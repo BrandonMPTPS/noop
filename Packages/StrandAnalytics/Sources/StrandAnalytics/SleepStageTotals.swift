@@ -56,6 +56,19 @@ public enum SleepStageTotals {
     }
 
     public static func dailyAggregate(_ stagesJSONs: [String?]) -> DailySleep? {
+        dailyAggregate(stagesJSONs, interFragmentAwakeSeconds: 0)
+    }
+
+    /// As `dailyAggregate(_:)`, but folds the OUT-OF-BED time between bridged main-night fragments into the
+    /// night's AWAKE total (and therefore its in-bed denominator). #777/#705 regression fix: when a main
+    /// sleep is bridged from two fragments split by a 20-min wake gap, that gap is real time the user was
+    /// awake/out of bed - it must show as ~20 min awake, not vanish. The fragments' own stages tile only
+    /// their individual `[start,end)` spans, so the inter-fragment gap is in NO fragment; the caller computes
+    /// it once (sum of gaps between consecutive fragments' effective ends and onsets) and passes it here so
+    /// both the analytics rollup and the edit/recompute seam apply ONE consistent definition: gap → awake →
+    /// in-bed. `interFragmentAwakeSeconds` ≤ 0 reproduces the legacy sum-of-stages behaviour. (#777/#705)
+    public static func dailyAggregate(_ stagesJSONs: [String?],
+                                      interFragmentAwakeSeconds: Double) -> DailySleep? {
         var total = Minutes()
         var any = false
         for j in stagesJSONs {
@@ -65,9 +78,27 @@ public enum SleepStageTotals {
                 any = true
             }
         }
+        if interFragmentAwakeSeconds > 0 { total.awake += interFragmentAwakeSeconds / 60.0 }
         guard any, total.inBed > 0 else { return nil }
         return DailySleep(totalSleepMin: total.asleep, efficiency: total.asleep / total.inBed,
                           deepMin: total.deep, remMin: total.rem, lightMin: total.light)
+    }
+
+    /// The OUT-OF-BED time (seconds) BETWEEN consecutive bridged sleep fragments - the inter-fragment wake
+    /// gaps the #561 gap-bridge spans but no fragment's own `[start,end)` covers. Each fragment is one
+    /// `(start,end)` span; sorted by start, the gap after fragment i is `max(0, start[i+1] - end[i])`. Sums
+    /// only positive gaps (overlapping/abutting fragments contribute 0). This is the single shared definition
+    /// of "awake between fragments" both `analyzeDay` and the edit/recompute seam fold into AWAKE, so the two
+    /// paths agree (no seam double-count). Pure + deterministic; cross-platform identical. (#777/#705)
+    public static func interFragmentAwakeSeconds(_ spans: [(start: Int, end: Int)]) -> Double {
+        guard spans.count > 1 else { return 0 }
+        let sorted = spans.sorted { $0.start < $1.start }
+        var gap = 0
+        for i in 1..<sorted.count {
+            let g = sorted[i].start - sorted[i - 1].end
+            if g > 0 { gap += g }
+        }
+        return Double(gap)
     }
 
     // MARK: - Canonical main-night selection (#525 / #547 — learned-timing scored pick)
@@ -454,8 +485,22 @@ public enum SleepStageTotals {
             // is one night, not the longer fragment only). Naps outside the group remain their own rows.
             let group = mainNightGroupIndicesByStages(blocks, onsetByStart: onsetByStart, offsetSec: offsetSec,
                                                       habitualMidsleepSec: habitualMidsleepSec)
-            if let group, let agg = dailyAggregate(group.map { blocks[$0].stagesJSON }) {
-                return (agg, applied)
+            // OUT-OF-BED time between the bridged fragments counts as AWAKE (#777/#705), using the SAME
+            // single definition `analyzeDay` applies so the seam can't double-count it. Each fragment's
+            // effective span is `[onset, onset + decoded in-bed]`; the gap between consecutive fragments is
+            // awake the fragments' own stages don't cover.
+            if let group {
+                let spans: [(start: Int, end: Int)] = group.map { i in
+                    let b = blocks[i]
+                    let onset = onsetByStart[b.startTs] ?? b.startTs
+                    let inBedSec = Int((minutes(fromStagesJSON: b.stagesJSON)?.inBed ?? 0) * 60.0)
+                    return (start: onset, end: onset + inBedSec)
+                }
+                let gapAwakeS = interFragmentAwakeSeconds(spans)
+                if let agg = dailyAggregate(group.map { blocks[$0].stagesJSON },
+                                            interFragmentAwakeSeconds: gapAwakeS) {
+                    return (agg, applied)
+                }
             }
             return nil
         }

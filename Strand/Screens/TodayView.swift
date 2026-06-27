@@ -311,10 +311,35 @@ struct TodayView: View {
         return days.last(where: { $0.recovery != nil && $0.day < selectedDayKey })
     }
 
-    /// "Last night · <date>" stamp for the carried-over recovery row, keyed on that scored day's own
-    /// date. Shared by every carried recovery read-out so the prior-day provenance reads identically.
+    /// Carry-over recency cap (#779): the "Last night" framing only holds when the carried scored day is
+    /// within this many days of today. A weeks-old import is still carried so the recovery side isn't a bare
+    /// blank, but it is relabelled "Latest sleep · <date>" so a stale number is NEVER passed off as today's.
+    static let carryFreshnessDays = 2
+
+    /// True when the carried scored day is OLDER than the freshness cap (#779), which drives the "Latest
+    /// sleep" relabel. Pure + unit-testable. Both keys are "yyyy-MM-dd"; an unparseable key (or non-positive gap)
+    /// reads as fresh so we never over-claim staleness. `todayKey` is today's logical-day key (carry-over is
+    /// today-only). Mirror EXACTLY in Kotlin.
+    static func isCarryStale(priorDayKey: String, todayKey: String) -> Bool {
+        guard let prior = dayKeyParser.date(from: priorDayKey),
+              let today = dayKeyParser.date(from: todayKey) else { return false }
+        let days = Calendar.current.dateComponents([.day], from: prior, to: today).day ?? 0
+        return days > carryFreshnessDays
+    }
+
+    /// The carried recovery caption stamp, keyed on that scored day's own date and its recency. Within the
+    /// freshness cap it reads "Last night · <date>"; once the carried day is older than the cap (#779) it
+    /// reads "Latest sleep · <date>" so a weeks-old import is never surfaced as "Last night". Shared by every
+    /// carried recovery read-out so the prior-day provenance reads identically. Mirror EXACTLY in Kotlin.
+    static func carriedCaption(priorDayKey: String, todayKey: String) -> String {
+        let prefix = isCarryStale(priorDayKey: priorDayKey, todayKey: todayKey) ? "Latest sleep" : "Last night"
+        return "\(prefix) · \(lastChargeDateFmt(priorDayKey))"
+    }
+
+    /// Instance convenience over the pure `carriedCaption`. `selectedDayKey` is today's logical-day key in
+    /// every carry-over context (the selector gates `isToday`), so it supplies the recency anchor.
     private func carriedCaption(_ prior: DailyMetric) -> String {
-        "Last night · \(Self.lastChargeDateFmt(prior.day))"
+        Self.carriedCaption(priorDayKey: prior.day, todayKey: selectedDayKey)
     }
 
     /// The most recent SCORED Charge to carry over on TODAY (#543) — the prior row's recovery value plus
@@ -336,7 +361,10 @@ struct TodayView: View {
         MetricTileState.resolve(
             hasTodayValue: displayDay?.recovery != nil,
             calibratingNightsRemaining: recoveryCalibration.map { max(1, Baselines.minNightsSeed - $0) },
-            carriedDate: lastScoredRecoveryDay.map { Self.lastChargeDateFmt($0.day) })
+            carriedDate: lastScoredRecoveryDay.map { Self.lastChargeDateFmt($0.day) },
+            carriedStale: lastScoredRecoveryDay.map {
+                Self.isCarryStale(priorDayKey: $0.day, todayKey: selectedDayKey)
+            } ?? false)
     }
 
     // MARK: Component 3 — recording status
@@ -2349,10 +2377,11 @@ struct TodayView: View {
             StatTile(
                 label: "Steps",
                 value: realSteps ?? estSteps.map { intString(Double($0)) } ?? "—",
-                // An estimated day reads "est."; a not-yet-calibrated day says how many more phone-counted
-                // days are needed (so a blank tile is never silently unexplained).
+                // An estimated day reads "est." plus the calibration STATUS (k / days / confidence) so a
+                // frozen-looking estimate self-explains (#760/#792); a not-yet-calibrated day says how many
+                // more phone-counted days are needed (so a blank tile is never silently unexplained, #589).
                 caption: realSteps != nil ? "today"
-                    : (estSteps != nil ? "est."
+                    : (estSteps != nil ? stepsEstimateCaption
                        : (needsCalibration ? stepsCalibrationCaption : "today")),
                 accent: (realSteps != nil || estSteps != nil) ? StrandPalette.metricCyan : StrandPalette.textPrimary,
                 sparkline: sparks["steps"],
@@ -2521,6 +2550,22 @@ struct TodayView: View {
             have: profile.stepsCalibrationSampleDays,
             need: StepsEstimateEngine.minCalibrationDays)
         return status.headline
+    }
+
+    /// #760/#792: the caption under an ESTIMATED Steps tile: "est. · <status detail>", where the detail is
+    /// the engine's own STATUS line (manual k, or k=… from N days + confidence tier) built from the SAME
+    /// persisted calibration the estimate used. So a WHOOP 4.0 user can see WHY the number reads as it does
+    /// (and why it may look frozen at low confidence) right where they notice the "est." flag, matching
+    /// Android. Falls back to a bare "est." if no coefficient is recorded yet.
+    private var stepsEstimateCaption: String {
+        let status: StepsEstimateEngine.CalibrationStatus = profile.stepsCalibrationManual
+            ? .manual(coefficient: profile.stepsCalibrationCoefficient,
+                      sampleDays: profile.stepsCalibrationSampleDays)
+            : .calibrated(coefficient: profile.stepsCalibrationCoefficient,
+                          sampleDays: profile.stepsCalibrationSampleDays,
+                          confidence: profile.stepsCalibrationConfidence)
+        guard profile.stepsCalibrationCoefficient > 0 else { return "est." }
+        return "est. · \(status.detail)"
     }
 
     // MARK: - Loading
@@ -3235,7 +3280,10 @@ enum MetricTileState: Equatable {
     /// Baselines still cold-start: `nightsRemaining` more nights until the score is personal. No number.
     case calibrating(nightsRemaining: Int)
     /// A prior scored day shown pre-tonight (#543 carry-over). `date` is that scored day's own date.
-    case carriedLastNight(date: String)
+    /// `stale` is true when that day is older than the freshness cap (#779): the carry is still shown so the
+    /// recovery side isn't a bare blank, but it's relabelled "Latest sleep" so a weeks-old import is never
+    /// passed off as "Last night".
+    case carriedLastNight(date: String, stale: Bool)
     /// No data for the period — strap not worn / not connected / not synced. No number.
     case needsStrap
 
@@ -3245,7 +3293,8 @@ enum MetricTileState: Equatable {
         switch self {
         case .scored:                       return nil
         case .calibrating:                  return "Calibrating"
-        case .carriedLastNight(let date):   return "Last night · \(date)"
+        case .carriedLastNight(let date, let stale):
+            return stale ? "Latest sleep · \(date)" : "Last night · \(date)"
         case .needsStrap:                   return "Needs the strap"
         }
     }
@@ -3258,8 +3307,12 @@ enum MetricTileState: Equatable {
         case .calibrating(let n):
             // "night(s)" pluralises honestly so a single remaining night doesn't read "1 nights".
             return "Building your baseline. About \(n) more \(n == 1 ? "night" : "nights") until your scores are personal."
-        case .carriedLastNight:
-            return "Tonight's lands after you sleep with the strap on."
+        case .carriedLastNight(_, let stale):
+            // A fresh post-rollover carry tells you tonight's score is on its way; a stale carry (an older
+            // import, #779) instead explains the number is from that earlier session, not today.
+            return stale
+                ? "This is your last scored session. Wear the strap overnight for a fresh score."
+                : "Tonight's lands after you sleep with the strap on."
         case .needsStrap:
             return "No data for today. Was your strap worn and connected overnight?"
         }
@@ -3272,8 +3325,10 @@ enum MetricTileState: Equatable {
             return nil
         case .calibrating(let n):
             return "Calibrating. Building your baseline. About \(n) more \(n == 1 ? "night" : "nights") until your scores are personal."
-        case .carriedLastNight(let date):
-            return "Last night, \(date). Tonight's lands after you sleep with the strap on."
+        case .carriedLastNight(let date, let stale):
+            return stale
+                ? "Latest sleep, \(date). This is your last scored session. Wear the strap overnight for a fresh score."
+                : "Last night, \(date). Tonight's lands after you sleep with the strap on."
         case .needsStrap:
             return "Needs the strap. No data for today. Was your strap worn and connected overnight?"
         }
@@ -3290,17 +3345,19 @@ enum MetricTileState: Equatable {
     /// the engine outputs already computed on the view. Mirror EXACTLY in Kotlin (same order of checks):
     ///   1. today's own value exists            → `.scored`
     ///   2. still mid-calibration (today only)  → `.calibrating(nightsRemaining)`
-    ///   3. a prior scored day to carry (#543)  → `.carriedLastNight(date)`
+    ///   3. a prior scored day to carry (#543)  → `.carriedLastNight(date, stale)`
     ///   4. nothing banked anywhere             → `.needsStrap`
     /// `nightsRemaining` is clamped to AT LEAST 1 so a boundary count never reads "0 more nights" while
     /// calibration is genuinely still on (the singular/plural rule then reads the clamped value). Mirror
-    /// the Kotlin `coerceAtLeast(1)` exactly.
+    /// the Kotlin `coerceAtLeast(1)` exactly. `carriedStale` (#779) relabels an out-of-cap carry to
+    /// "Latest sleep" so a weeks-old import is never passed off as "Last night".
     static func resolve(hasTodayValue: Bool,
                         calibratingNightsRemaining: Int?,
-                        carriedDate: String?) -> MetricTileState {
+                        carriedDate: String?,
+                        carriedStale: Bool = false) -> MetricTileState {
         if hasTodayValue { return .scored }
         if let remaining = calibratingNightsRemaining { return .calibrating(nightsRemaining: max(1, remaining)) }
-        if let date = carriedDate { return .carriedLastNight(date: date) }
+        if let date = carriedDate { return .carriedLastNight(date: date, stale: carriedStale) }
         return .needsStrap
     }
 }

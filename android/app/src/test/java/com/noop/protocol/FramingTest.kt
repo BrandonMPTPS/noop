@@ -324,6 +324,9 @@ class FramingTest {
         assertEquals(EventNumber.BATTERY_LEVEL, EventNumber.fromRaw(3))
         assertEquals(MetadataType.HISTORY_END, MetadataType.fromRaw(2))
         assertEquals(CommandNumber.RUN_HAPTICS_PATTERN, CommandNumber.fromRaw(79))
+        // #769: STOP_HAPTICS is cmd 122, the documented WHOOP 4.0 clear the Breathe teardown fires.
+        assertEquals(CommandNumber.STOP_HAPTICS, CommandNumber.fromRaw(122))
+        assertEquals(122, CommandNumber.STOP_HAPTICS.rawValue)
         assertNull(PacketType.fromRaw(999))
         assertNotNull(CommandNumber.fromRaw(26))
     }

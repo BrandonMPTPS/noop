@@ -1481,6 +1481,9 @@ class WhoopBleClient(
         // A user-initiated teardown is a clean slate: clear the #617 bond-loop streak so the next (manual)
         // reconnect starts fresh rather than inheriting old suspicion. Twin of macOS disconnect().
         postBondLoop.reset()
+        // #747/#750: a clean teardown clears the bond-refusal give-up + un-pauses auto-reconnect.
+        bondGiveUp.reset()
+        autoReconnectPausedForBondLoop = false
         // #711: a user-initiated teardown resolves the re-pair guide (no longer looping).
         _state.value = _state.value.copy(scanning = false, statusNote = null, reconnectGuide = null)
         // disconnect() can throw on a dead binder (radio off, #314). If it does, the OS won't deliver
@@ -1771,6 +1774,25 @@ class WhoopBleClient(
         val n = loops.coerceIn(0, 255)
         send(CommandNumber.RUN_HAPTICS_PATTERN, byteArrayOf(2, n.toByte(), 0, 0, 0))
         log("Buzz: patternId=2 loops=$n")
+    }
+
+    /**
+     * Tell the strap to STOP an in-progress haptic pattern (#769). The Breathe biofeedback loop schedules
+     * a stream of buzzes; ending the session stops scheduling NEW pulses but cannot recall a pattern the
+     * strap is already mid-way through. If the link then drops mid-pattern, the strap's haptic/UI manager
+     * can be left wedged with no app able to clear it. STOP_HAPTICS (cmd 122, payload [0x00]) is the
+     * documented, reversible clear for WHOOP 4.0.
+     *
+     * WHOOP 5/MG CAVEAT: the 5/MG buzz rides the maverick 0x13 path (a one-shot, not a sustained pattern),
+     * and we have NOT confirmed the 5/MG honours cmd 122 there. [send] does not allow-list 122 for the
+     * 5/MG family, so on a 5/MG this is a no-op (logged "skipped"), not a guessed write. So it is
+     * BEST-EFFORT: it reliably clears a wedged WHOOP 4.0; on a 5/MG the one-shot buzz already limits the
+     * wedge and we deliberately do not invent an unverified stop opcode. Twin of Swift AppModel.stopHaptics.
+     * Safe to call always (no-op when not connected or when the family doesn't accept it).
+     */
+    fun stopHaptics() {
+        send(CommandNumber.STOP_HAPTICS, byteArrayOf(0))
+        log("Stop haptics (cmd 122)")
     }
 
     /**
@@ -2277,6 +2299,19 @@ class WhoopBleClient(
     @Volatile
     private var bondRefusalStreak = 0
 
+    /** #747 / #750: after the bond is refused persistently, pause auto-reconnect (stop hammering) and write
+     *  a one-line epitaph. Fed by the SAME refusal events as [bondRefusalStreak]; its higher give-up
+     *  threshold fires once the pairing hint has had several cycles to be acted on. Reset on a genuine bond
+     *  or an explicit user reconnect. Twin of iOS `BLEManager.bondGiveUp`. */
+    private val bondGiveUp = BondRefusalGiveUp()
+
+    /** True while auto-reconnect is PAUSED by the #747 give-up. handleDisconnect consults this and skips
+     *  scheduling a reconnect; a manual connect()/disconnect() clears it via [bondGiveUp].reset(). @Volatile
+     *  because it's written from the GATT bond callback and read on the reconnect path. Twin of iOS
+     *  `autoReconnectPausedForBondLoop`. */
+    @Volatile
+    private var autoReconnectPausedForBondLoop = false
+
     /** A genuine bond this run: [address] is a live working strap (re-adopt target), and a bond proves no
      *  stale pin is wedging us — so clear the refusal streak. Twin of iOS `noteGenuineBond`. */
     private fun noteGenuineBond(address: String?) {
@@ -2342,7 +2377,7 @@ class WhoopBleClient(
      *  iOS BLEManager, which only sets pairingHint on the puffin link). Independent of the multi-WHOOP
      *  pin recovery in [noteBondRefusalIfPinned], which is left untouched. The guidance is mirrored into
      *  [statusNote] (already rendered on the Live screen) so it surfaces with no UI-layer change. */
-    private fun noteBondRefusalForPairingHint(status: Int) {
+    private fun noteBondRefusalForPairingHint(status: Int, failedAddress: String?) {
         if (!isInsufficientAuthStatus(status)) return
         if (didBond) return                                       // already bonded — not a pairing problem
         if (connectedFamily != DeviceFamily.WHOOP5) return        // WHOOP 4 bonds cleanly; hint is 5/MG-only
@@ -2356,12 +2391,29 @@ class WhoopBleClient(
             }
             _state.value = _state.value.copy(pairingHint = PAIRING_HINT_TEXT, statusNote = PAIRING_HINT_TEXT)
         }
+        // #747 / #750: feed the same refusal into the give-up tracker. Once it crosses the higher threshold
+        // (the pairing hint has had several cycles to be acted on), pause auto-reconnect so we stop hammering
+        // a strap that can't bond, write the one-line epitaph (opaque hashed id only, no PII), and surface
+        // the honest paused hint. A genuine bond or a manual reconnect re-arms it.
+        if (bondGiveUp.recordRefusal()) {
+            autoReconnectPausedForBondLoop = true
+            val opaque = BondRefusalGiveUp.opaqueId(failedAddress ?: "device")
+            log(BondRefusalGiveUp.epitaphLine(bondGiveUp.refusals, opaque))
+            _state.value = _state.value.copy(pairingHint = BondRefusalGiveUp.pausedHint())
+            if (testCentre.active(com.noop.testcentre.TestDomain.CONNECTION)) {
+                log("bond gaveUp refusals=${bondGiveUp.refusals} id=$opaque (auto-reconnect paused)",
+                    com.noop.testcentre.TestDomain.CONNECTION)
+            }
+        }
     }
 
     /** Clear the pairing-hint streak + published hint after a genuine bond or a fresh connect. Also clears
      *  the mirrored [statusNote] only when it still carries the hint, so we never wipe an unrelated note. */
     private fun clearPairingHint() {
         bondRefusalStreak = 0
+        // #747/#750: a genuine bond or a fresh user connect re-arms auto-reconnect and clears the give-up.
+        bondGiveUp.reset()
+        autoReconnectPausedForBondLoop = false
         if (_state.value.pairingHint != null) {
             val clearedNote = if (_state.value.statusNote == PAIRING_HINT_TEXT) null else _state.value.statusNote
             _state.value = _state.value.copy(pairingHint = null, statusNote = clearedNote)
@@ -2640,7 +2692,7 @@ class WhoopBleClient(
                 // Separately (#78): count the refusal toward the user-facing pairing hint. A 5/MG still
                 // bonded to the official WHOOP app keeps refusing the just-works bond; after two refusals
                 // we surface concrete pairing-mode guidance. Independent of the pin recovery above.
-                noteBondRefusalForPairingHint(status)
+                noteBondRefusalForPairingHint(status, g.device.address)
                 // Connection test mode: surface the failed-encrypt / "held by another central" hint as an
                 // upfront tagged line. INSUFFICIENT_AUTHENTICATION (5) / INSUFFICIENT_ENCRYPTION (15) ==
                 // the strap is still bonded to the official WHOOP app or a stale OS pairing. Gated
@@ -4314,7 +4366,16 @@ class WhoopBleClient(
         gattOps = null
         cmdCharacteristic = null
 
-        if (!intentionalDisconnect) {
+        if (autoReconnectPausedForBondLoop) {
+            // #747: the bond keeps being refused, so auto-reconnect is paused: we stop hammering a strap that
+            // can't bond (the epitaph + paused hint were already surfaced when the give-up tripped). The user
+            // re-arms it by tapping Connect (clearPairingHintForUserConnect). We do NOT schedule a reconnect.
+            log("Disconnected (status=$status); auto-reconnect paused (strap keeps refusing to pair; tap Connect once it's free)")
+            if (testCentre.active(com.noop.testcentre.TestDomain.CONNECTION)) {
+                log("connect down (uptime ends)", com.noop.testcentre.TestDomain.CONNECTION)
+                log("reconnect paused=bondLoop (strap refusing bond)", com.noop.testcentre.TestDomain.CONNECTION)
+            }
+        } else if (!intentionalDisconnect) {
             // Connection test mode: count + describe the reconnect churn, and mark the link down for the
             // uptime readout. Gated zero-cost (the CONNECTION bool is read before any string is built).
             // Diagnostic only - the reconnect logic below is unchanged. Twin of macOS, event-for-event:

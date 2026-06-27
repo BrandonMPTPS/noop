@@ -257,8 +257,25 @@ fun BreatheScreen(viewModel: AppViewModel) {
     DisposableEffect(Unit) {
         onDispose {
             // Leaving mid-session still banks the outcome (mirrors macOS onDisappear → stop()).
-            if (running) endSession()
+            if (running) {
+                endSession()
+                // #769: also tell the strap to stop haptics on the way out so a leftover pattern can't
+                // wedge the strap if the link drops after we navigate away. Best-effort (guarded send).
+                viewModel.stopHaptics()
+            }
             running = false
+        }
+    }
+
+    // #769: if the strap drops WHILE a session is live, end the session AND fire the stop-haptics clear.
+    // The breath-engine LaunchedEffect already stops scheduling pulses once `running` flips false; this
+    // adds the strap-side clear (best-effort) and banks the outcome, mirroring the macOS
+    // BiofeedbackController bond watch.
+    LaunchedEffect(live.bonded) {
+        if (!live.bonded && running) {
+            running = false
+            endSession()
+            viewModel.stopHaptics()
         }
     }
 
@@ -394,6 +411,9 @@ fun BreatheScreen(viewModel: AppViewModel) {
                     if (running) {
                         running = false
                         endSession()
+                        // #769: clear any pattern the strap is mid-way through so a drop right after stop
+                        // can't wedge its haptic manager. Best-effort (no-op when unbonded / on a 5/MG).
+                        viewModel.stopHaptics()
                     } else {
                         sessionSeconds = 0
                         breathCount = 0

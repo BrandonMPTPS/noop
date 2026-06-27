@@ -87,6 +87,83 @@ final class SkinTempAnalyticsTests: XCTestCase {
         XCTAssertNil(AnalyticsEngine.wornNightlySkinTempC([], hr: [], skinTemp: []))
     }
 
+    // MARK: - skin-temp funnel diagnostic (#752)
+
+    /// The kept-path: the funnel's mean is byte-identical to `wornNightlySkinTempC`, and the drop buckets +
+    /// kept sum to the total (every sample is accounted for exactly once).
+    func testFunnelKeptPathMatchesMeanAndAccountsForEverySample() throws {
+        let start = 6_000_000
+        let sess = [session(start: start, durSec: 600)]
+        let hrs = (0..<600).map { hr(start + $0) }
+        let temps = (0..<600).map { skin(start + $0, rawX100: 3400) }  // 34 °C, all worn + in-window
+        let f = AnalyticsEngine.skinTempFunnel(sess, hr: hrs, skinTemp: temps)
+        XCTAssertEqual(f.totalSamples, 600)
+        XCTAssertEqual(f.kept, 600)
+        XCTAssertEqual(f.droppedNotWorn + f.droppedOutOfWindow + f.droppedOutOfRange + f.kept, f.totalSamples)
+        XCTAssertEqual(try XCTUnwrap(f.mean), 34.0, accuracy: 1e-9)
+        XCTAssertFalse(f.isAbsent)
+        // The mean exactly matches the public wrapper (they share gate logic, so can't diverge).
+        XCTAssertEqual(f.mean, AnalyticsEngine.wornNightlySkinTempC(sess, hr: hrs, skinTemp: temps))
+    }
+
+    /// 4.0-style "skin temp absent" triage: samples exist but NONE are worn (no concurrent live HR), so the
+    /// funnel attributes the whole loss to `droppedNotWorn` and the mean is absent.
+    func testFunnelAllNotWornExplainsAbsence() {
+        let start = 7_000_000
+        let sess = [session(start: start, durSec: 600)]
+        let temps = (0..<600).map { skin(start + $0, rawX100: 3400) }
+        let f = AnalyticsEngine.skinTempFunnel(sess, hr: [], skinTemp: temps)
+        XCTAssertEqual(f.totalSamples, 600)
+        XCTAssertEqual(f.droppedNotWorn, 600)
+        XCTAssertEqual(f.kept, 0)
+        XCTAssertTrue(f.isAbsent)
+        XCTAssertTrue(f.summary.contains("notWorn=600"), "the summary names the dominant gate: \(f.summary)")
+    }
+
+    /// Worn + in-window samples that drift to ambient (~22 °C, on-charger) all fail the worn-range gate, so
+    /// the loss is attributed to `droppedOutOfRange` - the user can see it was off-wrist drift, not a bug.
+    func testFunnelOutOfRangeIsAttributedToRangeGate() {
+        let start = 8_000_000
+        let sess = [session(start: start, durSec: 600)]
+        let hrs = (0..<600).map { hr(start + $0) }
+        let temps = (0..<600).map { skin(start + $0, rawX100: 2200) }  // 22 °C ambient
+        let f = AnalyticsEngine.skinTempFunnel(sess, hr: hrs, skinTemp: temps)
+        XCTAssertEqual(f.droppedOutOfRange, 600)
+        XCTAssertEqual(f.droppedNotWorn, 0)
+        XCTAssertEqual(f.kept, 0)
+        XCTAssertTrue(f.isAbsent)
+    }
+
+    /// Worn samples outside every detected in-bed span are attributed to `droppedOutOfWindow`. With NO
+    /// session at all, every sample is out of window (matching the old early-return-nil behaviour).
+    func testFunnelOutOfWindowAndNoSession() {
+        let start = 9_000_000
+        let sess = [session(start: start, durSec: 600)]
+        let hrs = (0..<600).map { hr(start + 100_000 + $0) }            // worn, but far from the session
+        let temps = (0..<600).map { skin(start + 100_000 + $0, rawX100: 3400) }
+        let f = AnalyticsEngine.skinTempFunnel(sess, hr: hrs, skinTemp: temps)
+        XCTAssertEqual(f.droppedOutOfWindow, 600)
+        XCTAssertEqual(f.kept, 0)
+        XCTAssertTrue(f.isAbsent)
+        // No session → every sample is out of window, and the mean is absent (legacy early-return parity).
+        let none = AnalyticsEngine.skinTempFunnel([], hr: hrs, skinTemp: temps)
+        XCTAssertEqual(none.droppedOutOfWindow, 600)
+        XCTAssertTrue(none.isAbsent)
+    }
+
+    /// Below the min-samples floor: every sample is kept but the mean is still absent (the last gate), and
+    /// `kept` reports the survivor count so the user sees "only N < min" rather than a silent nil.
+    func testFunnelBelowMinSamplesKeepsButMeanAbsent() {
+        let start = 10_000_000
+        let sess = [session(start: start, durSec: 100)]
+        let hrs = (0..<100).map { hr(start + $0) }
+        let temps = (0..<100).map { skin(start + $0, rawX100: 3400) }  // 100 < minSkinTempSamples
+        let f = AnalyticsEngine.skinTempFunnel(sess, hr: hrs, skinTemp: temps)
+        XCTAssertEqual(f.kept, 100)
+        XCTAssertGreaterThan(f.minSamples, 100)
+        XCTAssertTrue(f.isAbsent, "kept < minSamples → no trusted mean")
+    }
+
     // MARK: - seed → deviation (skin_temp baseline)
 
     private let skinCfg = Baselines.metricCfg["skin_temp"]!

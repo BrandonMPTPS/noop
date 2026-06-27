@@ -36,6 +36,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.noop.ble.PuffinExperiment
 
 /**
  * Smart alarm (#207) — Android phone-based wake, with a guaranteed hard-deadline fallback.
@@ -47,8 +48,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
  * EARLIER; it can never cancel or skip the fallback. So you're woken by the window's end no matter
  * what. This screen is explicit about that safety guarantee.
  *
- * Also hosts the cross-platform WIND-DOWN nudge toggle (a gentle evening reminder), so both the wake
- * alarm and the nudge live in one place.
+ * This is the ONE alarm surface (#766). It hosts the phone-based Wake Window above, the strap's own
+ * standalone firmware wake-alarm (moved here from Automations), and the cross-platform WIND-DOWN nudge,
+ * so every wake/alarm control lives together instead of being split across two screens.
  */
 @Composable
 fun SmartAlarmScreen(vm: AppViewModel) {
@@ -68,10 +70,10 @@ fun SmartAlarmScreen(vm: AppViewModel) {
     // spacing unchanged (LazyColumn reproduces the eager `spacedBy(20.dp)`); only on-screen cards compose +
     // are accessibility-walked.
     LazyScreenScaffold(
-        // "Wake Window" so this NOOP phone-based smart wake doesn't collide with the strap firmware
-        // Smart alarm over in Automations (#730). Same feature, just a non-colliding name.
-        title = "Wake Window",
-        subtitle = "Wake in a lighter sleep phase, with a guaranteed backup at the window's end.",
+        // #766: "Alarms" because this screen now holds the phone Wake Window, the strap's firmware
+        // wake-alarm (moved here from Automations), and the wind-down reminder, so the broader title fits.
+        title = "Alarms",
+        subtitle = "Your wake window, the strap wake-alarm, and the evening wind-down reminder, in one place.",
     ) {
         // The guaranteed-wake card always shows so the safety promise is the first thing read.
         item { WindowCard(enabled = enabled, targetMinutes = targetMinutes, windowMinutes = windowMinutes) }
@@ -162,8 +164,93 @@ fun SmartAlarmScreen(vm: AppViewModel) {
         // The honest explanation of how detection works + its limits.
         item { ExplanationCard() }
 
+        // #766: the strap's own firmware wake-alarm (its own time + weekdays + per-day overrides). Moved
+        // here from Automations so every wake/alarm control sits on the one Alarms screen instead of being
+        // conflated with the wind-down reminder. Distinct from "Buzz WHOOP 4" above, which arms the strap
+        // at the PHONE alarm's time; this card is the strap's standalone schedule.
+        item { StrapAlarmCard(vm) }
+
         // The cross-platform wind-down nudge lives here too.
         item { WindDownCard(vm) }
+    }
+}
+
+/**
+ * The strap's standalone silent wake-alarm (#766, moved from AutomationsScreen). Arms the strap's own
+ * firmware alarm at the chosen time/weekdays over BLE, so it buzzes even if NOOP is closed. Reuses the
+ * shared [AlarmWeekdayPicker] / [AlarmDayOverridePicker] from AutomationsScreen (same behaviour, just a
+ * new home). Functions are untouched: it drives the same `viewModel.setSmartAlarm*` calls as before.
+ */
+@Composable
+private fun StrapAlarmCard(vm: AppViewModel) {
+    val context = LocalContext.current
+    val smartAlarm by vm.smartAlarmEnabled.collectAsStateWithLifecycle()
+    val alarmMinutes by vm.smartAlarmMinutes.collectAsStateWithLifecycle()
+    val alarmWeekdays by vm.smartAlarmWeekdays.collectAsStateWithLifecycle()
+    val alarmDayOverrides by vm.smartAlarmDayOverrides.collectAsStateWithLifecycle()
+    val live = vm.live.collectAsStateWithLifecycle().value
+    // The firmware alarm is EXPERIMENTAL on a WHOOP 5/MG: it only arms when Experimental probes are on,
+    // otherwise enabling it silently arms nothing (#111), so the UI says so instead of promising a wake.
+    val experimentalOn = PuffinExperiment.from(context).isEnabled
+
+    NoopCard(padding = 20.dp, tint = if (smartAlarm) Palette.accent else null) {
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Overline("Morning")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Alarm, contentDescription = null, tint = Palette.accent)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Strap wake-alarm", style = NoopType.title2, color = Palette.textPrimary)
+                }
+            }
+            ToggleRowLocal(
+                label = "Wake me with a strap buzz",
+                help = "Arms the strap to buzz at your wake time, even if NOOP is closed. Still experimental on WHOOP 4.0, so keep a backup alarm until you've confirmed it wakes you.",
+                checked = smartAlarm,
+                onChange = { vm.setSmartAlarmEnabled(it) },
+            )
+            if (smartAlarm) {
+                RowDividerLocal()
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Wake at", style = NoopType.body, color = Palette.textPrimary)
+                    Spacer(Modifier.weight(1f))
+                    TimeChip(
+                        minutes = alarmMinutes,
+                        accessibilityLabel = "Strap alarm wake time",
+                        onPicked = { vm.setSmartAlarmMinutes(it) },
+                    )
+                }
+                RowDividerLocal()
+                AlarmWeekdayPicker(
+                    selected = alarmWeekdays,
+                    onToggle = { dow -> vm.setSmartAlarmWeekdays(toggledSmartAlarmWeekday(dow, alarmWeekdays)) },
+                )
+                RowDividerLocal()
+                // Per-weekday wake-time OVERRIDES (#554): a different time for any day the alarm fires on.
+                AlarmDayOverridePicker(
+                    defaultMinutes = alarmMinutes,
+                    enabledDays = alarmWeekdays,
+                    overrides = alarmDayOverrides,
+                    onSetOverride = { dow, minutes -> vm.setSmartAlarmDayOverride(dow, minutes) },
+                )
+                RowDividerLocal()
+                if (live.whoop5Detected && !experimentalOn) {
+                    Text(
+                        "Your WHOOP 5/MG won't arm this until Experimental mode is on (Settings → " +
+                            "Experimental). Right now your wake time is saved but the strap is NOT armed.",
+                        style = NoopType.footnote, color = Palette.statusWarning,
+                    )
+                } else {
+                    Text(
+                        if (live.bonded)
+                            "Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed. Still experimental, so we can't yet guarantee it fires; keep a backup alarm."
+                        else
+                            "Connect your strap to arm this; it's set on the strap's own firmware alarm. Still experimental, so keep a backup alarm until you've confirmed it wakes you.",
+                        style = NoopType.footnote, color = Palette.textTertiary,
+                    )
+                }
+            }
+        }
     }
 }
 

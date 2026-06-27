@@ -47,4 +47,62 @@ final class BackfillerSessionTallyTests: XCTestCase {
             Backfiller.sessionSummaryLine(rows: 872, motion: 172, skinTemp: 0, nights: 1),
             "Backfill: session persisted 872 rows (172 with motion, 0 skin-temp) across 1 night(s).")
     }
+
+    // #783: trim=0xFFFFFFFF on a fresh run that banked NOTHING means "no banked history": the genuine
+    // clock/charge guidance with the "fully charge it" hint.
+    func testNoCursorLineNoRowsGivesNoHistoryGuidance() {
+        let line = Backfiller.noCursorLine(rowsPersisted: 0)
+        XCTAssertTrue(line.contains("no banked history to offload"))
+        XCTAssertTrue(line.contains("fully charge it"))
+    }
+
+    // #783: trim=0xFFFFFFFF AFTER the auto-continuation has already persisted rows means "caught up",
+    // NOT "no history". It must NOT emit the scary fully-charge guidance (that falsely alarmed users
+    // whose strap had just synced fine).
+    func testNoCursorLineAfterRowsGivesCaughtUpLine() {
+        let line = Backfiller.noCursorLine(rowsPersisted: 240)
+        XCTAssertTrue(line.contains("reached the end of available history"))
+        XCTAssertTrue(line.contains("240 row(s)"))
+        XCTAssertFalse(line.contains("no banked history"))
+        XCTAssertFalse(line.contains("fully charge"))
+    }
+
+    // No em-dash leaks into either branch (project hard rule).
+    func testNoCursorLineHasNoEmDash() {
+        XCTAssertFalse(Backfiller.noCursorLine(rowsPersisted: 0).contains("\u{2014}"))
+        XCTAssertFalse(Backfiller.noCursorLine(rowsPersisted: 5).contains("\u{2014}"))
+    }
+
+    // MARK: - #773 corrupt future-RTC detection
+
+    // A genuine offload is PAST-dated; a past timestamp is never flagged.
+    func testFutureRtcNotFlaggedForPastDate() {
+        let now = 1_700_000_000
+        XCTAssertFalse(Backfiller.isCorruptFutureRtc(endUnix: now - 86_400, wallNowUnix: now))
+        XCTAssertFalse(Backfiller.isCorruptFutureRtc(endUnix: now, wallNowUnix: now))
+    }
+
+    // Ordinary forward skew under the 1-day tolerance is NOT a corrupt clock (no false alarm).
+    func testFutureRtcToleratesSmallSkew() {
+        let now = 1_700_000_000
+        XCTAssertFalse(Backfiller.isCorruptFutureRtc(endUnix: now + 3_600, wallNowUnix: now))
+        // Exactly at the tolerance boundary is still OK (strictly greater trips it).
+        XCTAssertFalse(Backfiller.isCorruptFutureRtc(endUnix: now + Backfiller.futureRtcToleranceSeconds, wallNowUnix: now))
+    }
+
+    // A date days into the future can only be a corrupt strap RTC, so it's flagged.
+    func testFutureRtcFlaggedForFarFutureDate() {
+        let now = 1_700_000_000
+        XCTAssertTrue(Backfiller.isCorruptFutureRtc(endUnix: now + 10 * 86_400, wallNowUnix: now))
+    }
+
+    // The recovery hint names the cause + the fix and reports the days-ahead, with no em-dash.
+    func testFutureRtcLineWording() {
+        let now = 1_700_000_000
+        let line = Backfiller.futureRtcLine(endUnix: now + 10 * 86_400, wallNowUnix: now)
+        XCTAssertTrue(line.contains("10 day(s) in the FUTURE"))
+        XCTAssertTrue(line.contains("clock (RTC) is corrupt"))
+        XCTAssertTrue(line.contains("Fully charge"))
+        XCTAssertFalse(line.contains("\u{2014}"))
+    }
 }

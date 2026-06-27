@@ -1,6 +1,7 @@
 package com.noop.analytics
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -155,6 +156,69 @@ class MainNightConsistencyTest {
     // dropped on both platforms: it leaned on the SleepStager detecting a synthetic nap, which the
     // daytime-false-sleep guard rejects by design, so it tested detection (a #508 concern), not #525's
     // aggregation. The seam tests above cover the main-night-not-sum reconciliation deterministically.
+
+    // ── #777/#705 inter-fragment awake (out-of-bed gap between bridged fragments) ────────────────────
+
+    /** The shared definition: sum only the POSITIVE gaps between consecutive (start,end) spans, sorted by
+     *  start. Abutting / overlapping fragments contribute 0; an unsorted input is sorted first. Mirrors
+     *  Swift testInterFragmentAwakeSecondsSumsPositiveGapsOnly. */
+    @Test
+    fun interFragmentAwakeSecondsSumsPositiveGapsOnly() {
+        val f1 = 0L to 6 * 3600L
+        val f2 = (6 * 3600L + 20 * 60L) to 9 * 3600L
+        assertEquals((20 * 60).toDouble(), SleepStageTotals.interFragmentAwakeSeconds(listOf(f1, f2)), 1e-6)
+        // Order-independent.
+        assertEquals((20 * 60).toDouble(), SleepStageTotals.interFragmentAwakeSeconds(listOf(f2, f1)), 1e-6)
+        // Abutting / single → 0.
+        assertEquals(0.0, SleepStageTotals.interFragmentAwakeSeconds(listOf(0L to 100L, 100L to 200L)), 1e-6)
+        assertEquals(0.0, SleepStageTotals.interFragmentAwakeSeconds(listOf(0L to 100L)), 1e-6)
+        // Two gaps across three fragments sum (60s + 40s = 100s).
+        val three = listOf(0L to 100L, 160L to 300L, 340L to 500L)
+        assertEquals(100.0, SleepStageTotals.interFragmentAwakeSeconds(three), 1e-6)
+    }
+
+    /** #777/#705 regression fixture: a main night bridged from two fragments split by a 20-min OUT-OF-BED
+     *  gap reports ~20 min AWAKE on the day's rollup (it read as ~0 before). The seam folds the gap into
+     *  AWAKE via the in-bed denominator with NO double-count. Mirrors Swift
+     *  testHonoringEditsFragmentedNightCountsGapAsAwake. */
+    @Test
+    fun honoringEditsFragmentedNightCountsGapAsAwake() {
+        val f1Start = atHour(23) - 86_400L          // 23:00 onset, 180 min span
+        val f2Start = atMin(2, 20)                  // 02:20 onset → 20-min gap after f1's 02:00 end
+        val f1Stages = """{"awake":0,"light":120,"deep":30,"rem":30}""" // 180 asleep, 180 in-bed
+        val f2Stages = """{"awake":0,"light":140,"deep":40,"rem":40}""" // 220 asleep, 220 in-bed
+
+        val r = SleepStageTotals.dailyAggregateHonoringEdits(
+            detected = listOf(f1Start to f1Stages, f2Start to f2Stages),
+            edited = emptyMap(),
+            onsetByStart = mapOf(f1Start to f1Start, f2Start to f2Start),
+            offsetSec = 0L,
+        )
+        assertNotNull(r)
+        assertFalse(r!!.editApplied)
+        // Asleep is the SUM of the two fragments (400 min); the gap is awake, not sleep.
+        assertEquals("asleep is the sum of both fragments", 400.0, r.sleep.totalSleepMin, 1e-6)
+        // In-bed = 180 + 220 + 20 (gap) = 420 min. Awake = in-bed − asleep = 20 min (the gap), NOT ~0.
+        val awakeMin = r.sleep.totalSleepMin / r.sleep.efficiency - r.sleep.totalSleepMin
+        assertEquals("the 20-min out-of-bed gap reads as ~20 min awake (#777)", 20.0, awakeMin, 0.01)
+        assertEquals("efficiency reflects the gap", 400.0 / 420.0, r.sleep.efficiency, 1e-4)
+    }
+
+    /** The seam definition and the standalone aggregate agree to the minute (no double-count): feeding the
+     *  SAME gap to dailyAggregate(_, interFragmentAwakeSeconds) yields the identical in-bed/awake the seam
+     *  reports. A zero gap reproduces the legacy behaviour exactly. Mirrors Swift
+     *  testInterFragmentAwakeFoldsConsistentlyNoDoubleCount. */
+    @Test
+    fun interFragmentAwakeFoldsConsistentlyNoDoubleCount() {
+        val f1 = """{"awake":0,"light":120,"deep":30,"rem":30}""" // 180 asleep
+        val f2 = """{"awake":0,"light":140,"deep":40,"rem":40}""" // 220 asleep
+        val agg = SleepStageTotals.dailyAggregate(listOf(f1, f2), (20 * 60).toDouble())!!
+        assertEquals(400.0, agg.totalSleepMin, 1e-6)
+        assertEquals(400.0 / 420.0, agg.efficiency, 1e-4)
+        val legacy = SleepStageTotals.dailyAggregate(listOf(f1, f2))!!
+        val folded0 = SleepStageTotals.dailyAggregate(listOf(f1, f2), 0.0)!!
+        assertEquals(legacy.efficiency, folded0.efficiency, 1e-12)
+    }
 
     // ── #547 learned-timing scored selector (the gate is gone) ───────────────────────────────────
 

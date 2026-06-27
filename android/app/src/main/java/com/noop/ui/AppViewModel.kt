@@ -1683,6 +1683,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Fire a haptic buzz on the strap (requires a bonded connection). */
     fun buzz(loops: Int = 2) = ble.buzz(loops)
 
+    /** Tell the strap to stop an in-progress haptic pattern (#769). Best-effort; no-op when not connected
+     *  or on a 5/MG (cmd 122 isn't confirmed on its 0x13 path). Used by the Breathe session teardown. */
+    fun stopHaptics() = ble.stopHaptics()
+
     // --- Double-tap action (parity since 4.2.8). Persisted via NoopPrefs; dispatched from the init
     // LiveState collector on a fresh DOUBLE_TAP event. Port of macOS BehaviorStore.doubleTapAction +
     // AppModel.handleDoubleTap / runMacAction (Apple-applicable subset only). ---

@@ -730,6 +730,23 @@ private struct ProfileStep: View {
 
                         Divider().overlay(StrandPalette.hairline)
 
+                        // Units control (#781). Without this, onboarding read `unitSystemRaw` for the
+                        // Weight/Height display but had NO way to set it, so US users were locked to
+                        // kg/cm until they later found Settings → Units. Mirror the Sex picker idiom; the
+                        // stored profile stays SI either way, only the displayed labels re-format (lb / ft-in
+                        // via UnitFormatter). Same key (`units.system`) the Settings → Units card writes.
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Units").strandOverline()
+                            Picker("Units", selection: $unitSystemRaw) {
+                                Text("Metric").tag(UnitSystem.metric.rawValue)
+                                Text("Imperial").tag(UnitSystem.imperial.rawValue)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                        }
+
+                        Divider().overlay(StrandPalette.hairline)
+
                         // Steppers, not sliders — matches the Age row above and the macOS Settings
                         // profile editor (same ranges/steps), so every numeric profile field is
                         // consistent across onboarding and Settings on both platforms.

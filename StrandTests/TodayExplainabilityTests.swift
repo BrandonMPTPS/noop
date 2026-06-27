@@ -32,7 +32,30 @@ final class TodayExplainabilityTests: XCTestCase {
         let s = MetricTileState.resolve(hasTodayValue: false,
                                    calibratingNightsRemaining: nil,
                                    carriedDate: "14 Jun")
-        XCTAssertEqual(s, .carriedLastNight(date: "14 Jun"))
+        XCTAssertEqual(s, .carriedLastNight(date: "14 Jun", stale: false))
+    }
+
+    func testScoreState_carryWithinCap_isFreshLastNight() {
+        // #779: a recent carry keeps the "Last night" framing.
+        let s = MetricTileState.resolve(hasTodayValue: false,
+                                   calibratingNightsRemaining: nil,
+                                   carriedDate: "14 Jun",
+                                   carriedStale: false)
+        XCTAssertEqual(s, .carriedLastNight(date: "14 Jun", stale: false))
+        XCTAssertEqual(s.title, "Last night · 14 Jun")
+    }
+
+    func testScoreState_staleCarry_relabelsLatestSleep() {
+        // #779: a weeks-old carry is still shown (not a bare blank) but relabelled so the number is never
+        // passed off as "Last night".
+        let s = MetricTileState.resolve(hasTodayValue: false,
+                                   calibratingNightsRemaining: nil,
+                                   carriedDate: "14 May",
+                                   carriedStale: true)
+        XCTAssertEqual(s, .carriedLastNight(date: "14 May", stale: true))
+        XCTAssertEqual(s.title, "Latest sleep · 14 May")
+        XCTAssertEqual(s.accessibilityText,
+                       "Latest sleep, 14 May. This is your last scored session. Wear the strap overnight for a fresh score.")
     }
 
     func testScoreState_nothingBanked_isNeedsStrap() {
@@ -78,7 +101,7 @@ final class TodayExplainabilityTests: XCTestCase {
     }
 
     func testScoreState_carriedLastNight_stampsDate() {
-        XCTAssertEqual(MetricTileState.carriedLastNight(date: "14 Jun").accessibilityText,
+        XCTAssertEqual(MetricTileState.carriedLastNight(date: "14 Jun", stale: false).accessibilityText,
                        "Last night, 14 Jun. Tonight's lands after you sleep with the strap on.")
     }
 
@@ -102,7 +125,8 @@ final class TodayExplainabilityTests: XCTestCase {
 
     func testScoreState_copy_hasNoEmDash() {
         let states: [MetricTileState] = [.calibrating(nightsRemaining: 2),
-                                    .carriedLastNight(date: "14 Jun"),
+                                    .carriedLastNight(date: "14 Jun", stale: false),
+                                    .carriedLastNight(date: "14 May", stale: true),
                                     .needsStrap]
         for s in states {
             XCTAssertFalse(s.accessibilityText!.contains("\u{2014}"),

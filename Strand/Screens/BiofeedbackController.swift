@@ -75,9 +75,22 @@ final class BiofeedbackController: ObservableObject {
     private unowned let model: AppModel
     private let live: LiveState
 
+    /// Watches the bond so a mid-session BLE drop tears the session down (#769).
+    private var bondWatch: AnyCancellable?
+
     init(model: AppModel, live: LiveState) {
         self.model = model
         self.live = live
+        // #769: if the strap drops WHILE a haptic session is live, stop() (both to halt scheduling more
+        // pulses against a dead link and to fire the stop-haptics clear; the send no-ops once the link is
+        // fully gone, but on a graceful teardown it can still reach the strap before the radio closes, and
+        // it always clears our app-side schedule). Only act on a real running->dropped edge.
+        bondWatch = live.$bonded
+            .removeDuplicates()
+            .sink { [weak self] isBonded in
+                guard let self, !isBonded, self.running else { return }
+                self.stop()
+            }
     }
 
     // MARK: - Shared session bookkeeping
@@ -127,8 +140,18 @@ final class BiofeedbackController: ObservableObject {
     }
 
     /// Stop whatever is running, cancel every queued pulse, restore auto-lock. Idempotent.
+    ///
+    /// #769: cancelling the queued DispatchWorkItems stops us scheduling NEW pulses, but a pulse the strap
+    /// is already mid-pattern on keeps buzzing and can wedge the strap's haptic manager if the link then
+    /// drops. So we ALSO tell the strap to stop haptics (STOP_HAPTICS, cmd 122) on every stop. Best-effort
+    /// and family-aware: it reliably clears a wedged WHOOP 4.0; on a 5/MG it's a no-op (the maverick buzz is
+    /// a one-shot and 122 isn't confirmed on its 0x13 path) - see AppModel.stopHaptics. The send is itself
+    /// fully guarded (no-ops once the link is gone) so calling it unconditionally is safe on both the user
+    /// stop and the disconnect-driven stop; on a graceful drop it can still reach the strap before the radio
+    /// closes.
     func stop() {
         clearSchedule()
+        model.stopHaptics()
         ScreenIdle.keepAwake(false)
         running = false
         session = .none

@@ -60,10 +60,10 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .devices: return "Devices"
         case .notifications: return "Notifications"
         case .automation: return "Automations"
-        // Wind-Down (the evening wind-down nudge). Renamed from "Smart Alarm" so it no longer
-        // collides with the strap firmware Smart alarm in Automations (#730). The case name and
-        // rawValue stay `smartAlarm`/"Smart Alarm" as the in-memory nav identifier only.
-        case .smartAlarm: return "Wind-Down"
+        // "Alarms" is the ONE alarm surface (#766): the strap's silent wake-alarm (moved in from
+        // Automations) and the evening wind-down reminder, in one place. Previously "Wind-Down" (#730).
+        // The case name and rawValue stay `smartAlarm`/"Smart Alarm" as the in-memory nav identifier only.
+        case .smartAlarm: return "Alarms"
         case .settings: return "Settings"
         case .support: return "Support"
         }

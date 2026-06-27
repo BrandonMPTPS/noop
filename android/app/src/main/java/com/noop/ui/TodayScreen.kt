@@ -96,6 +96,7 @@ import com.noop.analytics.HydrationGoal
 import com.noop.analytics.HydrationStore
 import com.noop.analytics.ReadinessEngine
 import com.noop.analytics.ScoreConfidence
+import com.noop.analytics.StepsEstimateEngine
 import com.noop.analytics.StrainScorer
 import com.noop.data.AppleDaily
 import com.noop.data.DailyMetric
@@ -664,19 +665,20 @@ fun TodayScreen(
     // Derived from lastScoredRecoveryDay so Charge and every other recovery tile carry the SAME prior day.
     val lastScoredCharge: LastCharge? = remember(lastScoredRecoveryDay) {
         lastScoredRecoveryDay?.let { prior ->
-            prior.recovery?.let { LastCharge(it, "Last night · ${lastChargeDateLabel(prior.day)}") }
+            prior.recovery?.let { LastCharge(it, carriedCaption(prior.day, carryOverTodayKey)) }
         }
     }
 
     // Explainability (COMPONENT 2): the honest state of the score side for TODAY — scored / calibrating /
     // carried-last-night / needs-strap. One state, never a bare blank, and never a fabricated number. Only
     // computed for today (offset 0); a past day shows its own row, not a "needs the strap" prompt.
-    val scoreState: ScoreState = remember(displayMetric, recoveryCalibration, lastScoredRecoveryDay, selectedDayOffset) {
+    val scoreState: ScoreState = remember(displayMetric, recoveryCalibration, lastScoredRecoveryDay, selectedDayOffset, carryOverTodayKey) {
         if (selectedDayOffset == 0) {
             scoreStateForToday(
                 todayRecovery = displayMetric?.recovery,
                 calibratingNights = recoveryCalibration,
                 carriedDay = lastScoredRecoveryDay,
+                today = carryOverTodayKey,
             )
         } else {
             ScoreState.Scored(displayMetric?.recovery ?: 0.0)
@@ -1031,6 +1033,7 @@ fun TodayScreen(
                 profileWeightKg = profileWeightKg,
                 importedStepsForDay = importedStepsForDay,
                 estimatedStepsForDay = stepsEstForDay,
+                stepsEstimateCaption = stepsEstimateCaption(profileStore),
                 restScore = restScoreForDay,
                 restSpark = restCompositeSpark,
                 enabledMetrics = enabledKeyMetrics,
@@ -1759,7 +1762,7 @@ private fun SynthesisHeroCard(
                 "Learning your baseline, $recoveryCalibration of ${Baselines.minNightsSeed} nights."
             } else if (carriedDay != null) {
                 // Carried prior-day read — summarise that day + stamp it so it isn't passed off as today's.
-                synthesisDetail(carriedDay) + " Last night · ${lastChargeDateLabel(carriedDay.day)}."
+                synthesisDetail(carriedDay) + " ${carriedCaption(carriedDay.day)}."
             } else {
                 synthesisDetail(day)
             },
@@ -1888,7 +1891,7 @@ private fun HeroMetricRows(day: DailyMetric?, carriedDay: DailyMetric? = null) {
                         modifier = Modifier.size(13.dp),
                     )
                     Text(
-                        "Last night · ${lastChargeDateLabel(carriedDay.day)}",
+                        carriedCaption(carriedDay.day),
                         style = NoopType.footnote,
                         color = Palette.textTertiary,
                     )
@@ -2196,6 +2199,28 @@ private fun DashboardCardRow(
     }
 }
 
+/** #760/#792: the caption under an ESTIMATED Steps tile: "est. · <status detail>", where the detail is the
+ *  engine's own STATUS line (manual k, or k=… from N days + confidence tier) built from the SAME persisted
+ *  calibration the estimate used. So a WHOOP 4.0 user can see WHY the number reads as it does (and why it may
+ *  look frozen at low confidence) right where they notice the "est." flag. Falls back to a bare "est." when no
+ *  coefficient is recorded yet. Mirrors iOS `stepsEstimateCaption`. */
+private fun stepsEstimateCaption(profileStore: ProfileStore): String {
+    if (profileStore.stepsCalibrationCoefficient <= 0.0) return "est."
+    val status: StepsEstimateEngine.CalibrationStatus = if (profileStore.stepsCalibrationManual) {
+        StepsEstimateEngine.CalibrationStatus.Manual(
+            coefficient = profileStore.stepsCalibrationCoefficient,
+            sampleDays = profileStore.stepsCalibrationSampleDays,
+        )
+    } else {
+        StepsEstimateEngine.CalibrationStatus.Calibrated(
+            coefficient = profileStore.stepsCalibrationCoefficient,
+            sampleDays = profileStore.stepsCalibrationSampleDays,
+            confidence = profileStore.stepsCalibrationConfidence,
+        )
+    }
+    return "est. · ${status.detail}"
+}
+
 /** Group-separated integer display from a Double (e.g. 12 345 steps), matching the Apple Health tiles. A
  *  file-internal twin of the private [intString] so the dashboard rows format steps/calories identically. */
 private fun intStringGrouped(v: Double): String {
@@ -2364,7 +2389,7 @@ private fun RecoveryContributorsSection(day: DailyMetric?, carriedDay: DailyMetr
     val resp = cd?.respRateBpm
     if (hrv == null && rhr == null && sleepMin == null && resp == null) return
 
-    val overline = carriedDay?.let { "Recovery · Last night · ${lastChargeDateLabel(it.day)}" } ?: "Recovery"
+    val overline = carriedDay?.let { "Recovery · ${carriedCaption(it.day)}" } ?: "Recovery"
     SectionHeader("Contributors", overline = overline, trailing = "What drove Charge")
     NoopCard {
         Column(verticalArrangement = Arrangement.spacedBy(Metrics.space16)) {
@@ -2495,6 +2520,28 @@ internal fun lastChargeDateLabel(dayKey: String): String =
         LocalDate.parse(dayKey).format(DateTimeFormatter.ofPattern("d MMM", Locale.US))
     }.getOrDefault(dayKey)
 
+/** Carry-over recency cap (#779): the "Last night" framing only holds when the carried scored day is
+ *  within this many days of today. Mirrors iOS TodayView.carryFreshnessDays. */
+internal const val CARRY_FRESHNESS_DAYS = 2L
+
+/** True when the carried scored day is OLDER than the freshness cap (#779), which drives the "Latest
+ *  sleep" relabel. Pure + unit-testable. Both keys are "yyyy-MM-dd"; an unparseable key (or non-positive gap)
+ *  reads as fresh so we never over-claim staleness. [today] is today's key (carry-over is today-only),
+ *  defaulted to the device's current date for the composable call sites. Mirrors iOS isCarryStale. */
+internal fun isCarryStale(priorDayKey: String, today: String = LocalDate.now().toString()): Boolean =
+    runCatching {
+        ChronoUnit.DAYS.between(LocalDate.parse(priorDayKey), LocalDate.parse(today)) > CARRY_FRESHNESS_DAYS
+    }.getOrDefault(false)
+
+/** The carried recovery caption stamp, keyed on that scored day's own date and its recency. Within the
+ *  freshness cap it reads "Last night · <date>"; once the carried day is older than the cap (#779) it reads
+ *  "Latest sleep · <date>" so a weeks-old import is never surfaced as "Last night". Shared by every carried
+ *  recovery read-out so the prior-day provenance reads identically. Mirrors iOS carriedCaption. */
+internal fun carriedCaption(priorDayKey: String, today: String = LocalDate.now().toString()): String {
+    val prefix = if (isCarryStale(priorDayKey, today)) "Latest sleep" else "Last night"
+    return "$prefix · ${lastChargeDateLabel(priorDayKey)}"
+}
+
 // ════════════════════════════════════════════════════════════════════════════════════════════════════
 // Explainability layer — COMPONENTS 2, 3, 4 (spec: 2026-06-20-sleep-guidance-explainability.md)
 //
@@ -2523,8 +2570,10 @@ sealed class ScoreState {
     data class Calibrating(val nightsRemaining: Int) : ScoreState()
 
     /** A prior scored day shown before tonight is scored (#543 carry-over), stamped with [dateLabel]
-     *  ("d MMM") so the prior read is never passed off as today's. */
-    data class CarriedLastNight(val dateLabel: String) : ScoreState()
+     *  ("d MMM") so the prior read is never passed off as today's. [stale] is true when that day is older
+     *  than the freshness cap (#779): the carry is still shown so the recovery side isn't a bare blank, but
+     *  it's relabelled "Latest sleep" so a weeks-old import is never passed off as "Last night". */
+    data class CarriedLastNight(val dateLabel: String, val stale: Boolean = false) : ScoreState()
 
     /** No data for today at all — strap not worn / not connected / not synced. Shows NO number. */
     object NeedsStrap : ScoreState()
@@ -2534,7 +2583,7 @@ sealed class ScoreState {
         get() = when (this) {
             is Scored -> ""
             is Calibrating -> "Calibrating"
-            is CarriedLastNight -> "Last night · $dateLabel"
+            is CarriedLastNight -> if (stale) "Latest sleep · $dateLabel" else "Last night · $dateLabel"
             NeedsStrap -> "Needs the strap"
         }
 
@@ -2547,7 +2596,11 @@ sealed class ScoreState {
                 val nights = if (nightsRemaining == 1) "night" else "nights"
                 "Building your baseline. About $nightsRemaining more $nights until your scores are personal."
             }
-            is CarriedLastNight -> "Tonight's lands after you sleep with the strap on."
+            is CarriedLastNight ->
+                // A fresh post-rollover carry tells you tonight's score is on its way; a stale carry (an
+                // older import, #779) instead explains the number is from that earlier session, not today.
+                if (stale) "This is your last scored session. Wear the strap overnight for a fresh score."
+                else "Tonight's lands after you sleep with the strap on."
             NeedsStrap -> "No data for today. Was your strap worn and connected overnight?"
         }
 }
@@ -2567,12 +2620,15 @@ internal fun scoreStateForToday(
     calibratingNights: Int?,
     carriedDay: DailyMetric?,
     seed: Int = Baselines.minNightsSeed,
+    today: String = LocalDate.now().toString(),
 ): ScoreState = when {
     todayRecovery != null -> ScoreState.Scored(todayRecovery)
     // "About N more nights" = the seed gate minus the nights banked so far, floored at 1 (zero would read
     // as "ready" when it isn't). Calibrating never fakes a value.
     calibratingNights != null -> ScoreState.Calibrating((seed - calibratingNights).coerceAtLeast(1))
-    carriedDay != null -> ScoreState.CarriedLastNight(lastChargeDateLabel(carriedDay.day))
+    // #779: a carry older than the freshness cap is still shown (not a bare blank) but relabelled to
+    // "Latest sleep" so a weeks-old import is never passed off as "Last night".
+    carriedDay != null -> ScoreState.CarriedLastNight(lastChargeDateLabel(carriedDay.day), isCarryStale(carriedDay.day, today))
     else -> ScoreState.NeedsStrap
 }
 
@@ -2822,6 +2878,10 @@ private fun MetricGrid(
     profileWeightKg: Double = 75.0,
     importedStepsForDay: Int? = null,
     estimatedStepsForDay: Int? = null,
+    // #760/#792: the caption under an ESTIMATED Steps tile: the engine's STATUS line (manual k, or
+    // k=… from N days + confidence tier) so a frozen-looking estimate self-explains. Built from the SAME
+    // persisted calibration the estimate used; defaults to a bare "est." for callers that don't supply it.
+    stepsEstimateCaption: String = "est.",
     restScore: Double? = null,
     // The Rest tile's sparkline: the trailing-window Rest composite (0–100, `sleep_performance`), so the
     // mini-graph tracks the Rest SCORE rather than raw sleep minutes (#614 follow-up). Other tiles still
@@ -2833,7 +2893,7 @@ private fun MetricGrid(
 ) {
     // The "Last night · <date>" caption carried recovery-vital tiles show in place of their unit when
     // they're showing the prior scored day's value (#543); null when not carrying. Mirrors iOS.
-    val carriedVitalCaption = carriedDay?.let { "Last night · ${lastChargeDateLabel(it.day)}" }
+    val carriedVitalCaption = carriedDay?.let { carriedCaption(it.day) }
     // One builder per tile, keyed by KeyMetric so the grid can be filtered + reordered per the saved
     // layout (#251). Each builder is byte-for-byte the tile that used to be hard-coded in the list — the
     // refactor only changes WHICH tiles render and in WHAT order, never how an individual tile looks.
@@ -2970,12 +3030,13 @@ private fun MetricGrid(
                 modifier = m,
                 label = "Steps",
                 value = steps?.let { intString(it.toDouble()) } ?: NO_DATA,
-                // An estimated day reads "est." so the number is never taken as a measured count. H10:
-                // with no count at all, say steps are still building today rather than a captionless
-                // "No Data" (today only; a past day with no steps stays a bare dash).
+                // An estimated day reads "est." plus the calibration STATUS (k / days / confidence) so a
+                // frozen-looking estimate self-explains (#760/#792); the number is never taken as a measured
+                // count. H10: with no count at all, say steps are still building today rather than a
+                // captionless "No Data" (today only; a past day with no steps stays a bare dash).
                 caption = when {
                     realSteps != null -> "steps"
-                    estimatedStepsForDay != null -> "est."
+                    estimatedStepsForDay != null -> stepsEstimateCaption
                     else -> buildingHint(KeyMetric.STEPS, isToday)
                 },
                 accent = steps?.let { Palette.metricCyan } ?: Palette.textTertiary,
@@ -3642,7 +3703,7 @@ private fun ReadinessSection(days: List<DailyMetric>, carriedDay: DailyMetric? =
     val readiness = remember(days, anchorKey) { ReadinessEngine.evaluate(days, today = anchorKey) }
     if (readiness.level == ReadinessEngine.Level.INSUFFICIENT) return
 
-    val overline = carriedDay?.let { "Last night · ${lastChargeDateLabel(it.day)}" } ?: "Should you push today?"
+    val overline = carriedDay?.let { carriedCaption(it.day) } ?: "Should you push today?"
     SectionHeader("Readiness", overline = overline)
     NoopCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

@@ -158,6 +158,47 @@ final class StepsEstimateEngineTests: XCTestCase {
         XCTAssertEqual(status.headline, "Calibrated by hand")
     }
 
+    // MARK: calibration STATUS surfaced on the tile (#760/#792 - k / days / confidence self-explain)
+
+    func testConfidenceTierThresholds() {
+        // < 0.34 low, < 0.67 medium, else high. The boundaries are inclusive at the lower tier's top.
+        XCTAssertEqual(StepsEstimateEngine.ConfidenceTier.from(0.0), .low)
+        XCTAssertEqual(StepsEstimateEngine.ConfidenceTier.from(0.33), .low)
+        XCTAssertEqual(StepsEstimateEngine.ConfidenceTier.from(0.34), .medium)
+        XCTAssertEqual(StepsEstimateEngine.ConfidenceTier.from(0.66), .medium)
+        XCTAssertEqual(StepsEstimateEngine.ConfidenceTier.from(0.67), .high)
+        XCTAssertEqual(StepsEstimateEngine.ConfidenceTier.from(1.0), .high)
+    }
+
+    func testStatusDetailCalibratedSurfacesKDaysAndConfidence() {
+        // A low-confidence calibrated fit must SAY so (the frozen-estimate complaint #760/#792): the detail
+        // names k, the day count, and the confidence tier.
+        let status = StepsEstimateEngine.CalibrationStatus.calibrated(
+            coefficient: 12.34, sampleDays: 6, confidence: 0.2)
+        XCTAssertEqual(status.confidenceTier, .low)
+        XCTAssertEqual(status.coefficient, 12.34)
+        XCTAssertEqual(status.detail, "k=12.3 from 6 days, low confidence")
+        // Singular day grammar.
+        let one = StepsEstimateEngine.CalibrationStatus.calibrated(
+            coefficient: 5.0, sampleDays: 1, confidence: 0.8)
+        XCTAssertEqual(one.confidenceTier, .high)
+        XCTAssertEqual(one.detail, "k=5.0 from 1 day, high confidence")
+    }
+
+    func testStatusDetailManualAndNeedsMoreDays() {
+        let manual = StepsEstimateEngine.CalibrationStatus.manual(coefficient: 9.5, sampleDays: 0)
+        XCTAssertEqual(manual.confidenceTier, .high)
+        XCTAssertEqual(manual.coefficient, 9.5)
+        XCTAssertEqual(manual.detail, "manual k=9.5")
+        let needs = StepsEstimateEngine.CalibrationStatus.needsMoreDays(have: 1, need: 3)
+        XCTAssertEqual(needs.confidenceTier, .low)
+        XCTAssertNil(needs.coefficient)
+        XCTAssertEqual(needs.detail, "calibrating: 1/3 days")
+        // `have` is clamped to `need` in the fraction so it never reads more than the requirement.
+        let over = StepsEstimateEngine.CalibrationStatus.needsMoreDays(have: 9, need: 3)
+        XCTAssertEqual(over.detail, "calibrating: 3/3 days")
+    }
+
     // MARK: #693 — apple-health steps + strap motion over the calibration window
 
     /// A day's still-with-walking-bursts gravity at 1 Hz: `bursts` short active windows separated by stillness,

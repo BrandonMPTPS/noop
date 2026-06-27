@@ -360,7 +360,17 @@ object SleepStageTotals {
 
     /** The night's daily sleep aggregate over these blocks' `stagesJSON`, or null if none decode.
      *  Mirrors Swift `dailyAggregate`. */
-    fun dailyAggregate(stagesJSONs: List<String?>): DailySleep? {
+    fun dailyAggregate(stagesJSONs: List<String?>): DailySleep? =
+        dailyAggregate(stagesJSONs, interFragmentAwakeSeconds = 0.0)
+
+    /** As [dailyAggregate], but folds the OUT-OF-BED time between bridged main-night fragments into the
+     *  night's AWAKE total (and therefore its in-bed denominator). #777/#705 regression fix: a main sleep
+     *  bridged from two fragments split by a 20-min wake gap was reporting that gap as nowhere (it is in no
+     *  fragment's own span), so 20+ min of real awake read as ~4 min. The caller computes the gap once
+     *  (sum of gaps between consecutive fragments' effective ends and onsets) and passes it here so both the
+     *  analytics rollup and the edit/recompute seam apply ONE consistent definition: gap → awake → in-bed.
+     *  `interFragmentAwakeSeconds` <= 0 reproduces the legacy sum-of-stages behaviour. Mirrors Swift. */
+    fun dailyAggregate(stagesJSONs: List<String?>, interFragmentAwakeSeconds: Double): DailySleep? {
         val total = Minutes()
         var any = false
         for (j in stagesJSONs) {
@@ -371,6 +381,7 @@ object SleepStageTotals {
             total.rem += mm.rem
             any = true
         }
+        if (interFragmentAwakeSeconds > 0.0) total.awake += interFragmentAwakeSeconds / 60.0
         if (!any || total.inBed <= 0.0) return null
         return DailySleep(
             totalSleepMin = total.asleep,
@@ -379,6 +390,23 @@ object SleepStageTotals {
             remMin = total.rem,
             lightMin = total.light,
         )
+    }
+
+    /** The OUT-OF-BED time (seconds) BETWEEN consecutive bridged sleep fragments - the inter-fragment wake
+     *  gaps the #561 gap-bridge spans but no fragment's own `[start,end)` covers. Each fragment is one
+     *  (start,end) span; sorted by start, the gap after fragment i is `max(0, start[i+1] - end[i])`. Sums
+     *  only positive gaps. The single shared definition of "awake between fragments" both `analyzeDay` and
+     *  the edit/recompute seam fold into AWAKE, so the two paths agree (no seam double-count). Mirrors
+     *  Swift `interFragmentAwakeSeconds`. (#777/#705) */
+    fun interFragmentAwakeSeconds(spans: List<Pair<Long, Long>>): Double {
+        if (spans.size <= 1) return 0.0
+        val sorted = spans.sortedBy { it.first }
+        var gap = 0L
+        for (i in 1 until sorted.size) {
+            val g = sorted[i].first - sorted[i - 1].second
+            if (g > 0L) gap += g
+        }
+        return gap.toDouble()
     }
 
     /** Result of [dailyAggregateHonoringEdits]: the aggregate plus whether an edit actually applied. */
@@ -456,7 +484,18 @@ object SleepStageTotals {
             // night `analyzeDay` does. Naps outside the group remain their own rows. Mirrors Swift.
             val group = mainNightGroupIndicesByStages(blocks, onsetByStart, offsetSec, habitualMidsleepSec)
                 ?: return null
-            val agg = dailyAggregate(group.map { blocks[it].second }) ?: return null
+            // OUT-OF-BED time between the bridged fragments counts as AWAKE (#777/#705), using the SAME
+            // single definition `analyzeDay` applies so the seam can't double-count it. Each fragment's
+            // effective span is `[onset, onset + decoded in-bed]`; the gap between consecutive fragments is
+            // awake the fragments' own stages don't cover. Mirrors Swift.
+            val spans = group.map { i ->
+                val b = blocks[i]
+                val onset = onsetByStart[b.first] ?: b.first
+                val inBedSec = ((minutes(b.second)?.inBed ?: 0.0) * 60.0).toLong()
+                onset to (onset + inBedSec)
+            }
+            val gapAwakeS = interFragmentAwakeSeconds(spans)
+            val agg = dailyAggregate(group.map { blocks[it].second }, gapAwakeS) ?: return null
             return HonoredAggregate(agg, applied)
         }
         val agg = dailyAggregate(blocks.map { it.second }) ?: return null

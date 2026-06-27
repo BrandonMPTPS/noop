@@ -142,10 +142,11 @@ private enum class Destination(
 
     // Group: System
     Automations("automations", "Automations", Icons.Filled.Bolt),
-    // "Wake Window" is the NOOP phone-based smart wake (light-sleep detection inside a window, with a
-    // guaranteed OS backup alarm). Renamed from "Smart Alarm" so it no longer collides with the strap
-    // firmware Smart alarm in Automations (#730). Route id stays "smart_alarm" — display string only.
-    SmartAlarm("smart_alarm", "Wake Window", Icons.Filled.Alarm),
+    // "Alarms" is the ONE alarm surface (#766): the phone-based Wake Window (light-sleep detection with a
+    // guaranteed OS backup), the strap's own firmware wake-alarm, and the wind-down reminder, all in one
+    // place. Previously "Wake Window" (#730), but the strap alarm moved in from Automations so the broader
+    // name fits. Route id stays "smart_alarm" (display string only).
+    SmartAlarm("smart_alarm", "Alarms", Icons.Filled.Alarm),
     Devices("devices", "Devices", Icons.Filled.Sensors),
     DataSources("data_sources", "Data Sources", Icons.Filled.Storage),
     FusedRecord("fused_record", "Your Data, Fused", Icons.AutoMirrored.Filled.CompareArrows),

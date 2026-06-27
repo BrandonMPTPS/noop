@@ -660,8 +660,10 @@ private fun ProfileStep() {
     val context = LocalContext.current
     val profile = remember { ProfileStore.from(context.applicationContext) }
     // Imperial/Metric display preference (D#103). The stored profile is always SI; the steppers keep
-    // operating in SI and only the DISPLAYED value re-labels to lb / ft-in.
-    val unitSystem = UnitPrefs.system(context)
+    // operating in SI and only the DISPLAYED value re-labels to lb / ft-in. Held in remembered state
+    // (#781) so the Units control below can flip it live. SharedPreferences isn't reactive, so the
+    // picker writes through to NoopPrefs AND updates this state to re-render the Weight/Height labels.
+    var unitSystem by remember { mutableStateOf(UnitPrefs.system(context)) }
     var rev by remember { mutableIntStateOf(0) }
     fun mutate(block: () -> Unit) {
         block()
@@ -693,6 +695,24 @@ private fun ProfileStep() {
                             ?: ONBOARDING_SEX_OPTIONS[0],
                         label = { it.label },
                         onSelect = { mutate { profile.sex = it.tag } },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                ThinDivider()
+                // Units control (#781). Onboarding read `unitSystem` for the Weight/Height display but
+                // had no way to set it, so US users were locked to kg/cm until they found Settings →
+                // Units. Mirror the Sex picker idiom; the stored profile stays SI either way, only the
+                // displayed labels re-format (lb / ft-in). Same key Settings → Units writes.
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Overline("Units", color = Palette.textTertiary)
+                    SegmentedPillControl(
+                        items = listOf(UnitSystem.METRIC, UnitSystem.IMPERIAL),
+                        selection = unitSystem,
+                        label = { if (it == UnitSystem.METRIC) "Metric" else "Imperial" },
+                        onSelect = {
+                            unitSystem = it
+                            NoopPrefs.setUnitSystem(context, it)
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }

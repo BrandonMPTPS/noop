@@ -253,13 +253,25 @@ object AnalyticsEngine {
         for (s in mainGroup) {
             val m = SleepStager.hypnogramMetrics(s)
             val inBed = (s.end - s.start).toDouble()
-            inBedS += inBed                       // SUM each fragment's in-bed (excludes the wake gap)
+            inBedS += inBed                       // each fragment's own in-bed span (the gap is added below)
             effWeighted += s.efficiency * inBed   // in-bed-weighted efficiency across the group
             deepS += m.deepMin * 60.0
             remS += m.remMin * 60.0
             lightS += m.lightMin * 60.0
             tstS += m.tstS
             disturbances += m.disturbances
+        }
+        // OUT-OF-BED time BETWEEN bridged fragments is AWAKE (#777/#705): a main night bridged from two
+        // fragments split by a 20-min wake gap was reporting that gap as nowhere (it is in no fragment's
+        // [start,end) span), so 20+ min of real awake read as ~4 min - a v7.1 regression, multi-reporter.
+        // Fold the gap into AWAKE by extending the in-bed denominator (in-bed = asleep + awake; tstS is
+        // unchanged), so efficiency and the Rest composite both reflect it. ONE shared definition with the
+        // edit/recompute seam ([SleepStageTotals.interFragmentAwakeSeconds]), so the two paths agree and the
+        // denominator is never double-counted. A bridged gap also counts as one disturbance. Mirrors Swift.
+        val gapAwakeS = SleepStageTotals.interFragmentAwakeSeconds(mainGroup.map { it.start to it.end })
+        if (gapAwakeS > 0.0) {
+            inBedS += gapAwakeS                   // the gap is fully awake: extends in-bed, adds 0 to effWeighted
+            disturbances += 1
         }
         val efficiency = if (inBedS > 0) effWeighted / inBedS else 0.0
 
@@ -530,27 +542,86 @@ object AnalyticsEngine {
         hr: List<HrSample>,
         skinTemp: List<SkinTempSample>,
         minSamples: Int = MIN_SKIN_TEMP_SAMPLES_INLINE,
-    ): Double? {
-        if (sessions.isEmpty() || skinTemp.isEmpty()) return null
-        val wornSeconds = HashSet<Long>(hr.size)
-        for (h in hr) if (h.bpm in 30..220) wornSeconds.add(h.ts)
-        var sum = 0.0
-        var n = 0
-        for (t in skinTemp) {
-            if (t.ts !in wornSeconds) continue
-            if (sessions.none { t.ts in it.start..it.end }) continue
-            val c = t.raw / 100.0
-            if (c < SKIN_TEMP_MIN_C || c > SKIN_TEMP_MAX_C) continue
-            sum += c
-            n++
-        }
-        return if (n >= minSamples) sum / n else null
-    }
+    ): Double? = skinTempFunnel(sessions, hr, skinTemp, minSamples).mean
 
     /** Plausible worn skin-temperature range (°C). Off-wrist/charging samples drift to ambient and are
      *  excluded; the strap's own decode gate is the looser 20–45. (PR #85) */
     private const val SKIN_TEMP_MIN_C: Double = 28.0
     private const val SKIN_TEMP_MAX_C: Double = 42.0
+
+    // ── Skin-temp funnel diagnostic (#752) ──────────────────────────────────────────────────────────
+
+    /**
+     * Why nightly skin temp funneled toward absent for one night. Counts are over the night's raw skin-temp
+     * samples; each sample is attributed to the FIRST gate that dropped it, in the SAME order
+     * [wornNightlySkinTempC] applies (not-worn → out-of-window → out-of-range → kept), so the four drop
+     * buckets plus [kept] sum to [totalSamples]. Pure + deterministic; shares the exact gate logic with the
+     * real computation, so it explains the SAME mean the app uses. Mirrors Swift `SkinTempFunnelDiagnostic`.
+     * (#752)
+     */
+    data class SkinTempFunnelDiagnostic(
+        val totalSamples: Int,
+        val droppedNotWorn: Int,
+        val droppedOutOfWindow: Int,
+        val droppedOutOfRange: Int,
+        val kept: Int,
+        val minSamples: Int,
+        val mean: Double?,
+    ) {
+        /** True when the night produced no usable mean - the case this diagnostic exists to triage. */
+        val isAbsent: Boolean get() = mean == null
+
+        /** One human-readable line for the caller to LOG. No I/O here - the engine stays pure. */
+        val summary: String
+            get() = "skin-temp-funnel: $totalSamples samples → kept $kept/$minSamples " +
+                "(mean=${mean?.let { String.format(java.util.Locale.US, "%.2f°C", it) } ?: "absent"}); " +
+                "dropped[notWorn=$droppedNotWorn, outOfWindow=$droppedOutOfWindow, " +
+                "outOfRange=$droppedOutOfRange]"
+    }
+
+    /**
+     * Read-only skin-temp funnel for one night (#752). Re-runs the SAME wear/window/range gates
+     * [wornNightlySkinTempC] uses (and produces the IDENTICAL mean), additionally counting where each
+     * sample dropped, so an absent skin temp is self-explaining. [wornNightlySkinTempC] is a thin wrapper
+     * over this, so the two can never disagree. Pure + deterministic. Mirrors Swift `skinTempFunnel`. (#752)
+     */
+    fun skinTempFunnel(
+        sessions: List<DetectedSleep>,
+        hr: List<HrSample>,
+        skinTemp: List<SkinTempSample>,
+        minSamples: Int = MIN_SKIN_TEMP_SAMPLES_INLINE,
+    ): SkinTempFunnelDiagnostic {
+        val total = skinTemp.size
+        // No sessions ⇒ every sample is out of window; no samples ⇒ an empty funnel. Either way the mean is
+        // null, exactly as [wornNightlySkinTempC]'s early return produced before.
+        if (sessions.isEmpty() || skinTemp.isEmpty()) {
+            return SkinTempFunnelDiagnostic(
+                totalSamples = total, droppedNotWorn = 0,
+                droppedOutOfWindow = if (sessions.isEmpty()) total else 0,
+                droppedOutOfRange = 0, kept = 0, minSamples = minSamples, mean = null,
+            )
+        }
+        val wornSeconds = HashSet<Long>(hr.size)
+        for (h in hr) if (h.bpm in 30..220) wornSeconds.add(h.ts)
+        var sum = 0.0
+        var kept = 0
+        var notWorn = 0
+        var outOfWindow = 0
+        var outOfRange = 0
+        for (t in skinTemp) {
+            if (t.ts !in wornSeconds) { notWorn++; continue }
+            if (sessions.none { t.ts in it.start..it.end }) { outOfWindow++; continue }
+            val c = t.raw / 100.0
+            if (c < SKIN_TEMP_MIN_C || c > SKIN_TEMP_MAX_C) { outOfRange++; continue }
+            sum += c
+            kept++
+        }
+        val mean = if (kept >= minSamples) sum / kept else null
+        return SkinTempFunnelDiagnostic(
+            totalSamples = total, droppedNotWorn = notWorn, droppedOutOfWindow = outOfWindow,
+            droppedOutOfRange = outOfRange, kept = kept, minSamples = minSamples, mean = mean,
+        )
+    }
 }
 
 /*

@@ -97,6 +97,10 @@ final class Backfiller {
     /// Logged once per session when the strap reports trim=0xFFFFFFFF — the "no valid flash cursor"
     /// sentinel: it has no banked history to offload (a clock/charge state, not a decode bug).
     private var loggedNoCursor = false
+    /// #773: logged once per session the first time a HISTORY_END's own timestamp is dated implausibly far
+    /// in the FUTURE (a corrupt strap RTC). Distinct from #547's per-record drop tally: this fires on the
+    /// chunk metadata's own clock, the earliest visible tell that the strap's RTC is bogus. Reset in begin().
+    private var loggedFutureRtc = false
 
     /// #547: running count of historical records DROPPED this session for an implausible own-timestamp
     /// (a bad-clock strap — far-past / bogus-2027 / future-dated). Tallied across chunks and surfaced once
@@ -179,6 +183,7 @@ final class Backfiller {
         sessionSkinTempRows = 0
         sessionNightKeys.removeAll(keepingCapacity: true)
         loggedNoCursor = false
+        loggedFutureRtc = false
         sessionDroppedImplausible = 0
         loggedLayoutVersions.removeAll(keepingCapacity: true)
         // #547: the range markers belong to a connection's GET_DATA_RANGE, which BLEManager re-sets per
@@ -240,6 +245,40 @@ final class Backfiller {
         return "Backfill: session persisted \(rows) rows (\(motion) with motion, \(skinTemp) skin-temp) across \(nights) night(s)."
     }
 
+    /// The trim=0xFFFFFFFF sentinel line (#783). 0xFFFFFFFF means two different things depending on whether
+    /// THIS run already banked rows. On the first end of a fresh offload it's the "no valid flash cursor"
+    /// state (no banked history, a clock/charge problem). But the #364 auto-continuation re-kicks
+    /// SEND_HISTORICAL after a run that DID persist rows, and the next end then carries 0xFFFFFFFF to mean
+    /// "caught up, nothing left past the last trim", NOT "no history". Emitting the alarming "fully charge
+    /// it" line there falsely scared users whose strap had just synced fine. So pick by `rowsPersisted`:
+    /// > 0 gives a neutral caught-up line; 0 gives the genuine no-history guidance. Pure so a fixture pins both.
+    nonisolated static func noCursorLine(rowsPersisted: Int) -> String {
+        if rowsPersisted > 0 {
+            return "Backfill: reached the end of available history (trim=0xFFFFFFFF) - caught up after persisting \(rowsPersisted) row(s) this run. Nothing more to offload."
+        }
+        return "Backfill: strap reported no flash cursor (trim=0xFFFFFFFF) - it has no banked history to offload. This is a clock/charge state on the strap, not a decode problem; fully charge it and reconnect so it starts banking."
+    }
+
+    /// #773: how far ahead of the wall clock a HISTORY_END's own timestamp may sit before we call the strap
+    /// RTC corrupt. The strap RTC and the phone normally agree within seconds; a genuine offload is always
+    /// dated in the PAST (it's banked history). A timestamp dated days into the FUTURE can only be a corrupt
+    /// strap clock. Generous (1 day) so ordinary skew or a timezone confusion never trips it.
+    nonisolated static let futureRtcToleranceSeconds = 86_400
+
+    /// #773: is this HISTORY_END timestamp an implausible FUTURE date (a corrupt strap RTC)? `endUnix` and
+    /// `wallNowUnix` are unix seconds in the same wall domain. Pure so a fixture pins the boundary.
+    nonisolated static func isCorruptFutureRtc(endUnix: Int, wallNowUnix: Int) -> Bool {
+        endUnix > wallNowUnix + futureRtcToleranceSeconds
+    }
+
+    /// #773: the recovery-hint line for a corrupt future-dated strap RTC. Names the cause plainly (the
+    /// strap's clock, not a NOOP bug) and gives the fix (charge + reconnect re-syncs the RTC). Byte-identical
+    /// to the Android twin. No em-dash (project rule).
+    nonisolated static func futureRtcLine(endUnix: Int, wallNowUnix: Int) -> String {
+        let aheadDays = max(0, (endUnix - wallNowUnix)) / 86_400
+        return "Backfill: the strap reported a record dated about \(aheadDays) day(s) in the FUTURE - its clock (RTC) is corrupt, not a NOOP problem. Those records can't be filed onto the right day. Fully charge the strap to 100% and reconnect so it re-syncs its clock; if it persists, forget and re-pair the strap."
+    }
+
     /// Commit one HISTORY_END chunk: (persist decoded → enqueueRaw when present) → setCursor → ackTrim.
     /// Early-returns on any throw to preserve the safe-trim invariant.
     ///
@@ -252,14 +291,33 @@ final class Backfiller {
     private func finishChunk(unix: UInt32, trim: UInt32, endFrame: [UInt8]) async {
         guard let endData = Backfiller.endData(from: endFrame, family: family) else { return }
 
-        // #150 forensics: trim=0xFFFFFFFF is the strap's "no valid flash cursor" sentinel — it has no
-        // banked history to hand over. Surface it once so a log reads as a clock/charge state on the
-        // strap, not a NOOP decode bug (retro-decode can't help here). The ack still proceeds below.
+        // #150 / #783: trim=0xFFFFFFFF is the strap's "no valid flash cursor" sentinel. Its MEANING depends
+        // on whether this run already banked anything. On the FIRST end of a fresh offload it means "no
+        // banked history" (a clock/charge state). But the auto-continuation (#364) re-kicks SEND_HISTORICAL
+        // after a run that DID persist rows, and the very next end then carries 0xFFFFFFFF to mean "you are
+        // caught up, nothing left past the last trim", NOT "no history". Emitting the scary
+        // "fully charge it" line there was wrong and alarmed users whose strap had just synced fine (#783).
+        // So gate the message on `sessionRowsPersisted == 0`: if rows landed this run, log a neutral
+        // caught-up line instead. Either way it logs once per session (loggedNoCursor) and the ack proceeds.
         if trim == 0xFFFFFFFF, !loggedNoCursor {
             loggedNoCursor = true
-            log?("Backfill: strap reported no flash cursor (trim=0xFFFFFFFF) — it has no banked history to offload. This is a clock/charge state on the strap, not a decode problem; fully charge it and reconnect so it starts banking.")
+            log?(Backfiller.noCursorLine(rowsPersisted: sessionRowsPersisted))
             // Connection test mode: the no-cursor sentinel as a compact tagged line (gated zero-cost).
             emitConnection(ConnectionTrace.noCursorLine())
+        }
+
+        // #773: corrupt future-RTC detection. A HISTORY_END carries the strap's own clock; a genuine offload
+        // is always PAST-dated (it's banked history), so an end dated days into the future can only be a
+        // corrupt strap RTC. Surface it ONCE per session with a recovery hint so the cause (the strap clock,
+        // not a NOOP bug) is named and the fix (charge + reconnect re-syncs the RTC) is given. Observability
+        // only - the ack still proceeds and the #547 ingest gate already keeps the bad-dated rows out of the
+        // DB. The 0xFFFFFFFF sentinel above is a different state (it isn't a real date), so skip it here.
+        if trim != 0xFFFFFFFF, !loggedFutureRtc {
+            let wallNow = Int(Date().timeIntervalSince1970)
+            if Backfiller.isCorruptFutureRtc(endUnix: Int(unix), wallNowUnix: wallNow) {
+                loggedFutureRtc = true
+                log?(Backfiller.futureRtcLine(endUnix: Int(unix), wallNowUnix: wallNow))
+            }
         }
 
         let frames = chunk

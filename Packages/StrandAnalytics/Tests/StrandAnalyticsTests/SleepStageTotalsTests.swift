@@ -277,6 +277,70 @@ final class SleepStageTotalsTests: XCTestCase {
         XCTAssertEqual(r.sleep.totalSleepMin, 48 + 392, accuracy: 0.001, "no onsets → legacy sum")
     }
 
+    // MARK: - #777/#705 inter-fragment awake (out-of-bed gap between bridged fragments)
+
+    /// The shared definition: sum only the POSITIVE gaps between consecutive (start,end) spans, sorted by
+    /// start. Abutting / overlapping fragments contribute 0; an unsorted input is sorted first.
+    func testInterFragmentAwakeSecondsSumsPositiveGapsOnly() {
+        // One 20-min gap between two fragments (06:00 → 06:20).
+        let f1 = (start: 0, end: 6 * 3600)
+        let f2 = (start: 6 * 3600 + 20 * 60, end: 9 * 3600)
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds([f1, f2]), Double(20 * 60), accuracy: 0.001)
+        // Order-independent: passing them reversed yields the SAME gap.
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds([f2, f1]), Double(20 * 60), accuracy: 0.001)
+        // Abutting fragments (no gap) → 0; a single fragment → 0.
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds([(0, 100), (100, 200)]), 0, accuracy: 0.001)
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds([(0, 100)]), 0, accuracy: 0.001)
+        // Two gaps across three fragments sum.
+        let three = [(0, 100), (160, 300), (340, 500)]  // 60s + 40s = 100s
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds(three), 100, accuracy: 0.001)
+    }
+
+    /// #777/#705 regression fixture: a main night bridged from two fragments split by a 20-min OUT-OF-BED
+    /// gap must report ~20 min AWAKE on the day's rollup (it read as ~0 before). The seam folds the gap into
+    /// AWAKE via the in-bed denominator - in-bed = asleep + (fragment awake + gap) - with NO double-count.
+    func testHonoringEditsFragmentedNightCountsGapAsAwake() throws {
+        // Two fragments of ONE night, each 0 staged-awake, split by a 20-min gap (< gapBridgeMaxMin → they
+        // bridge into the main-night group). Fragment 1: 23:00–02:00 (180 min asleep). 20-min gap. Fragment
+        // 2: 02:20–06:00 (220 min asleep). Per-fragment stages carry 0 awake, so without the fix the gap
+        // would vanish.
+        let f1Start = ts525("2026-06-14T23:00")
+        let f2Start = ts525("2026-06-15T02:20")  // 20-min gap after f1's 02:00 end
+        let f1Stages = #"{"awake":0,"light":120,"deep":30,"rem":30}"#   // 180 min asleep, 180 in-bed
+        let f2Stages = #"{"awake":0,"light":140,"deep":40,"rem":40}"#   // 220 min asleep, 220 in-bed
+
+        let r = try XCTUnwrap(SleepStageTotals.dailyAggregateHonoringEdits(
+            detected: [(startTs: f1Start, stagesJSON: f1Stages),
+                       (startTs: f2Start, stagesJSON: f2Stages)],
+            edited: [:],
+            onsetByStart: [f1Start: f1Start, f2Start: f2Start],
+            offsetSec: 0))
+        XCTAssertFalse(r.editApplied)
+        // Asleep is the SUM of the two fragments (180 + 220 = 400 min); the gap is awake, not sleep.
+        XCTAssertEqual(r.sleep.totalSleepMin, 400, accuracy: 0.001, "asleep is the sum of both fragments")
+        // In-bed = 180 + 220 + 20 (gap) = 420 min. Awake = in-bed − asleep = 20 min (the gap), NOT ~0.
+        let awakeMin = r.sleep.totalSleepMin / r.sleep.efficiency - r.sleep.totalSleepMin
+        XCTAssertEqual(awakeMin, 20, accuracy: 0.01, "the 20-min out-of-bed gap reads as ~20 min awake (#777)")
+        XCTAssertEqual(r.sleep.efficiency, 400.0 / 420.0, accuracy: 0.0001, "efficiency reflects the gap")
+    }
+
+    /// The seam definition and the standalone aggregate agree to the minute (no double-count): feeding the
+    /// SAME gap to `dailyAggregate(_:interFragmentAwakeSeconds:)` yields the identical in-bed/awake the seam
+    /// reports, proving the two paths share one definition (the PR #787 seam bug this fix avoids).
+    func testInterFragmentAwakeFoldsConsistentlyNoDoubleCount() throws {
+        let f1Stages = #"{"awake":0,"light":120,"deep":30,"rem":30}"#   // 180 asleep
+        let f2Stages = #"{"awake":0,"light":140,"deep":40,"rem":40}"#   // 220 asleep
+        let agg = try XCTUnwrap(SleepStageTotals.dailyAggregate([f1Stages, f2Stages],
+                                                                interFragmentAwakeSeconds: Double(20 * 60)))
+        XCTAssertEqual(agg.totalSleepMin, 400, accuracy: 0.001)
+        XCTAssertEqual(agg.efficiency, 400.0 / 420.0, accuracy: 0.0001)
+        // A zero gap reproduces the legacy behaviour exactly (backward-compat).
+        let legacy = try XCTUnwrap(SleepStageTotals.dailyAggregate([f1Stages, f2Stages]))
+        let folded0 = try XCTUnwrap(SleepStageTotals.dailyAggregate([f1Stages, f2Stages],
+                                                                    interFragmentAwakeSeconds: 0))
+        XCTAssertEqual(legacy.efficiency, folded0.efficiency, accuracy: 1e-12)
+    }
+
     // MARK: - #547 learned-timing scored selector (the gate is gone)
 
     /// Local time-of-day "HH:mm" → seconds, for habitual-midsleep expectations.

@@ -288,13 +288,25 @@ public enum AnalyticsEngine {
         for s in mainGroup {
             let m = SleepStager.hypnogramMetrics(s)
             let inBed = Double(s.end - s.start)
-            inBedS += inBed                       // SUM each fragment's in-bed (excludes the wake gap)
+            inBedS += inBed                       // each fragment's own in-bed span (the gap is added below)
             effWeighted += s.efficiency * inBed   // in-bed-weighted efficiency across the group
             deepS += m.deepMin * 60.0
             remS += m.remMin * 60.0
             lightS += m.lightMin * 60.0
             tstS += m.tstS
             disturbances += m.disturbances
+        }
+        // OUT-OF-BED time BETWEEN bridged fragments is AWAKE (#777/#705): a main night bridged from two
+        // fragments split by a 20-min wake gap was reporting that gap as nowhere (it is in no fragment's
+        // [start,end) span), so 20+ min of real awake read as ~4 min - a v7.1 regression, multi-reporter.
+        // Fold the gap into AWAKE by extending the in-bed denominator (in-bed = asleep + awake; tstS is
+        // unchanged), so efficiency and the Rest composite both reflect it. ONE shared definition with the
+        // edit/recompute seam (`SleepStageTotals.interFragmentAwakeSeconds`), so the two paths agree and the
+        // denominator is never double-counted. A bridged gap also counts as one disturbance.
+        let gapAwakeS = SleepStageTotals.interFragmentAwakeSeconds(mainGroup.map { (start: $0.start, end: $0.end) })
+        if gapAwakeS > 0 {
+            inBedS += gapAwakeS              // the gap is fully awake: extends in-bed, adds 0 to effWeighted
+            disturbances += 1
         }
         let efficiency = inBedS > 0 ? effWeighted / inBedS : 0.0
 
@@ -642,19 +654,93 @@ public enum AnalyticsEngine {
                                      hr: [HRSample],
                                      skinTemp: [SkinTempSample],
                                      minSamples: Int = minSkinTempSamples) -> Double? {
-        if sessions.isEmpty || skinTemp.isEmpty { return nil }
+        skinTempFunnel(sessions, hr: hr, skinTemp: skinTemp, minSamples: minSamples).mean
+    }
+
+    // MARK: - Skin-temp funnel diagnostic (#752)
+
+    // Skin temp coming out 0/absent on a WHOOP 4.0 (or any) night is opaque: the user can't tell whether
+    // there were no samples at all, every sample fell outside a detected in-bed span, none were worn (no
+    // concurrent live HR), every value was outside the plausible worn range, or there simply weren't enough
+    // survivors to trust a mean. This pure, READ-ONLY funnel re-runs the SAME gates `wornNightlySkinTempC`
+    // applies and counts where samples dropped - WITHOUT changing the mean or any score - so an absent
+    // skin-temp can be triaged ("0 raw samples in window" vs "1842 samples but none worn" vs "all out of the
+    // 28–42 °C range - likely off-wrist/charging"). It is a triage surface, logged by the caller, never a
+    // scoring change. Mirrors the REM-funnel diagnostic shape (#688). (#752)
+
+    /// Why nightly skin temp funneled toward absent for one night. Counts are over the night's raw skin-temp
+    /// samples; each sample is attributed to the FIRST gate that dropped it, in the SAME order
+    /// `wornNightlySkinTempC` applies (not-worn → out-of-window → out-of-range → kept), so the four drop
+    /// buckets plus `kept` sum to `totalSamples`. Pure + deterministic; shares the exact gate logic with the
+    /// real computation, so it explains the SAME mean the app uses. (#752)
+    public struct SkinTempFunnelDiagnostic: Equatable, Sendable {
+        /// Raw skin-temp samples seen for the night (the funnel's mouth).
+        public let totalSamples: Int
+        /// Dropped because no concurrent worn-HR second (the strap streams HR only on-wrist).
+        public let droppedNotWorn: Int
+        /// Worn, but the sample's timestamp fell in no detected in-bed session span.
+        public let droppedOutOfWindow: Int
+        /// Worn + in-window, but the value was outside the plausible worn range (28–42 °C) - likely
+        /// off-wrist/charging drift to ambient.
+        public let droppedOutOfRange: Int
+        /// Samples that passed every gate and fed the nightly mean.
+        public let kept: Int
+        /// Minimum kept samples required before a nightly mean is trusted (the last gate).
+        public let minSamples: Int
+        /// The nightly mean (°C) the gates produced, or nil when `kept < minSamples` (or no input).
+        public let mean: Double?
+
+        public init(totalSamples: Int, droppedNotWorn: Int, droppedOutOfWindow: Int,
+                    droppedOutOfRange: Int, kept: Int, minSamples: Int, mean: Double?) {
+            self.totalSamples = totalSamples; self.droppedNotWorn = droppedNotWorn
+            self.droppedOutOfWindow = droppedOutOfWindow; self.droppedOutOfRange = droppedOutOfRange
+            self.kept = kept; self.minSamples = minSamples; self.mean = mean
+        }
+
+        /// True when the night produced no usable mean - the case this diagnostic exists to triage.
+        public var isAbsent: Bool { mean == nil }
+
+        /// One human-readable line for the caller to LOG. No I/O here - the engine stays pure.
+        public var summary: String {
+            "skin-temp-funnel: \(totalSamples) samples → kept \(kept)/\(minSamples) "
+            + "(mean=\(mean.map { String(format: "%.2f°C", $0) } ?? "absent")); "
+            + "dropped[notWorn=\(droppedNotWorn), outOfWindow=\(droppedOutOfWindow), "
+            + "outOfRange=\(droppedOutOfRange)]"
+        }
+    }
+
+    /// Read-only skin-temp funnel for one night (#752). Re-runs the SAME wear/window/range gates
+    /// `wornNightlySkinTempC` uses (and produces the IDENTICAL mean), additionally counting where each
+    /// sample dropped, so an absent skin temp is self-explaining. The public `wornNightlySkinTempC` is a
+    /// thin wrapper over this, so the two can never disagree. Pure + deterministic. (#752)
+    public static func skinTempFunnel(_ sessions: [SleepSession],
+                                      hr: [HRSample],
+                                      skinTemp: [SkinTempSample],
+                                      minSamples: Int = minSkinTempSamples) -> SkinTempFunnelDiagnostic {
+        let total = skinTemp.count
+        // No sessions ⇒ every sample is out of window; no samples ⇒ an empty funnel. Either way the mean is
+        // nil, exactly as `wornNightlySkinTempC`'s early return produced before.
+        if sessions.isEmpty || skinTemp.isEmpty {
+            return SkinTempFunnelDiagnostic(totalSamples: total, droppedNotWorn: 0,
+                                            droppedOutOfWindow: sessions.isEmpty ? total : 0,
+                                            droppedOutOfRange: 0, kept: 0, minSamples: minSamples, mean: nil)
+        }
         var wornSeconds = Set<Int>(minimumCapacity: hr.count)
         for h in hr where (30...220).contains(h.bpm) { wornSeconds.insert(h.ts) }
         var sum = 0.0
-        var n = 0
+        var kept = 0
+        var notWorn = 0, outOfWindow = 0, outOfRange = 0
         for t in skinTemp {
-            if !wornSeconds.contains(t.ts) { continue }
-            if !sessions.contains(where: { t.ts >= $0.start && t.ts <= $0.end }) { continue }
+            if !wornSeconds.contains(t.ts) { notWorn += 1; continue }
+            if !sessions.contains(where: { t.ts >= $0.start && t.ts <= $0.end }) { outOfWindow += 1; continue }
             let c = Double(t.raw) / 100.0
-            if c < skinTempMinC || c > skinTempMaxC { continue }
+            if c < skinTempMinC || c > skinTempMaxC { outOfRange += 1; continue }
             sum += c
-            n += 1
+            kept += 1
         }
-        return n >= minSamples ? sum / Double(n) : nil
+        let mean = kept >= minSamples ? sum / Double(kept) : nil
+        return SkinTempFunnelDiagnostic(totalSamples: total, droppedNotWorn: notWorn,
+                                        droppedOutOfWindow: outOfWindow, droppedOutOfRange: outOfRange,
+                                        kept: kept, minSamples: minSamples, mean: mean)
     }
 }

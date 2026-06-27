@@ -625,6 +625,11 @@ private struct BreathingContent: View {
         running = false
         ScreenIdle.keepAwake(false)
         phaseDeadline = .distantFuture
+        // #769: this trainer fires per-phase buzzes (armPhase -> model.buzz). Stopping halts NEW pulses but
+        // can't recall one the strap is mid-pattern on, which could wedge the strap if the link drops. Tell
+        // the strap to stop haptics too (best-effort; no-op when unbonded / on a 5/MG). Only when we were
+        // actually buzzing, so a stop on an idle trainer stays silent.
+        if wasRunning { model.stopHaptics() }
         if wasRunning { captureOutcome() }
         if reduceMotion {
             orbProgress = 0

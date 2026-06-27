@@ -802,6 +802,23 @@ final class AppModel: ObservableObject {
         ble.send(.runHapticsPattern, payload: [pattern, loops, 0, 0, 0])
     }
 
+    /// Tell the strap to STOP an in-progress haptic pattern (#769). The biofeedback layers (Breathe /
+    /// "Calm me" / resonance) schedule a stream of buzzes; cancelling the app-side DispatchWorkItems stops
+    /// scheduling NEW pulses but cannot recall a pattern the strap is already mid-way through. If the link
+    /// then drops mid-pattern, the strap's UI/haptic manager can be left wedged on that pattern with no app
+    /// able to clear it. STOP_HAPTICS (cmd 122, payload [0x00]) is the documented, reversible clear for
+    /// WHOOP 4.0.
+    ///
+    /// WHOOP 5/MG CAVEAT: the 5/MG buzz rides the maverick 0x13 path (a one-shot, not a sustained pattern),
+    /// and we have NOT confirmed the 5/MG honours cmd 122 on that path. `send` does not allow-list 122 for
+    /// the 5/MG family, so on a 5/MG this is a no-op (logged "skipped"), not a guessed write. So this is
+    /// BEST-EFFORT: it reliably clears a wedged WHOOP 4.0; on a 5/MG the one-shot nature already limits the
+    /// wedge, and we deliberately do not invent an unverified stop opcode. Safe to call always (no-op when
+    /// unbonded or when the family doesn't accept it).
+    func stopHaptics() {
+        ble.send(.stopHaptics, payload: [0x00])
+    }
+
     // MARK: - Wrist-buzz mirror notifications (PR #577 — iOS only)
     //
     // iOS can't keep the strap buzz silent in a pocket the way macOS surfaces it on screen, so a wrist

@@ -127,6 +127,72 @@ struct PostBondTimeoutLoopDetector {
     }
 }
 
+/// #747 / #750: decides when a strap that keeps REFUSING the encrypted bond ("Encryption/Authentication is
+/// insufficient", no genuine bond in between) has refused enough times that hammering it further is
+/// pointless. Two responsibilities, both pure so they're unit-testable without a CoreBluetooth seam:
+///
+///  - #747 PAUSE: after `giveUpThreshold` consecutive refusals the auto-reconnect should STOP re-kicking
+///    (it can't bond without the user freeing the strap / re-pairing), so the caller pauses the rescan and
+///    surfaces an honest hint instead of looping forever and draining the battery.
+///  - #750 EPITAPH: at the same moment, emit ONE summary "epitaph" line recording how the bond attempt
+///    died (the streak + an opaque, install-local id), so a shared strap log carries the cause without any
+///    PII (no MAC, no serial, just the count and a short opaque token).
+///
+/// The streak accumulates across the reconnect loop (a disconnect does NOT reset it) and is cleared only by
+/// a genuine bond or an explicit user reconnect, exactly like BLEManager's existing `bondRefusalStreak`.
+struct BondRefusalGiveUp {
+    /// Consecutive bond refusals before we pause auto-reconnect + write the epitaph. 5 (not 2, where the
+    /// pairing HINT already shows): the hint asks the user to act; we give them several reconnect cycles to
+    /// do it before we stop hammering. A genuinely held/stale strap reaches 5 within a couple of minutes.
+    let giveUpThreshold: Int
+
+    private(set) var refusals = 0
+    /// True once `giveUpThreshold` is reached: auto-reconnect should pause and the epitaph has been (or
+    /// should be) written. Stays true until `reset()` so the pause holds across the loop.
+    private(set) var gaveUp = false
+
+    init(giveUpThreshold: Int = 5) { self.giveUpThreshold = giveUpThreshold }
+
+    /// Record one bond refusal. Returns true if THIS refusal freshly crossed the give-up threshold (so the
+    /// caller pauses the reconnect + writes the epitaph exactly once).
+    mutating func recordRefusal() -> Bool {
+        refusals += 1
+        if !gaveUp && refusals >= giveUpThreshold {
+            gaveUp = true
+            return true
+        }
+        return false
+    }
+
+    /// Clear the streak: a genuine bond landed, or the user explicitly reconnected. Re-arms auto-reconnect.
+    mutating func reset() {
+        refusals = 0
+        gaveUp = false
+    }
+
+    /// #750: the one-line bond-refusal EPITAPH. Records the streak + an OPAQUE install-local id only, never
+    /// a MAC or serial. `opaqueId` should be a short token derived from the CoreBluetooth-local peripheral
+    /// UUID (per-install, not the hardware address), which carries no PII. Pure so a fixture pins it. No
+    /// em-dash (project rule). Byte-identical to the Android twin.
+    static func epitaphLine(refusals: Int, opaqueId: String) -> String {
+        "Bond epitaph: the strap [\(opaqueId)] refused the encrypted bond \(refusals)x in a row with no successful bond - giving up auto-reconnect to stop hammering it. It is almost certainly held by the official WHOOP app or a stale phone pairing. Free it (close the WHOOP app, put the strap in pairing mode, forget it in Bluetooth settings) then reconnect in NOOP."
+    }
+
+    /// #747: the honest user-facing hint shown when auto-reconnect pauses. Tells them WHY it stopped and how
+    /// to get going again. Pure; no em-dash. Byte-identical to the Android twin.
+    static func pausedHint() -> String {
+        "NOOP stopped retrying because your strap keeps refusing to pair. It is likely still held by the official WHOOP app, or your phone is holding an old pairing. Close the WHOOP app, put the strap in pairing mode (tap until the LEDs flash blue), and if it is listed in your Bluetooth settings choose Forget This Device. Then tap Connect to try again."
+    }
+
+    /// #750: a short OPAQUE token from a CoreBluetooth-local peripheral UUID for the epitaph. The CB UUID is
+    /// per-install (NOT the hardware MAC), and we keep only its first 8 hex chars, so the token is stable
+    /// within a log but carries no device-identifying PII. Pure + deterministic. Twin of the Android helper.
+    static func opaqueId(fromLocalUUID uuid: String) -> String {
+        let hex = uuid.replacingOccurrences(of: "-", with: "").lowercased()
+        return String(hex.prefix(8))
+    }
+}
+
 /// Decides when a completed sync that handed over only the strap's console/diagnostic output (no sensor
 /// records) is sustained enough to warn that the strap's clock has lost sync and it isn't banking to flash
 /// (#77 / #91 / #120). A SINGLE empty cycle is common on a perfectly healthy strap — the strap can hand
@@ -526,6 +592,16 @@ public final class BLEManager: NSObject, ObservableObject {
     /// (so it accumulates across the reconnect loop). Distinct from `pinnedBondRefusals`, which is gated to
     /// the multi-WHOOP pinned peripheral and drives the #52 stale-pin handoff.
     private var bondRefusalStreak = 0
+    /// #747 / #750: after the bond is refused persistently, pause auto-reconnect (stop hammering) and write
+    /// a one-line epitaph. Fed by the SAME refusal events as `bondRefusalStreak`; its higher give-up
+    /// threshold fires once the pairing HINT has had several cycles to be acted on. Reset on a genuine bond
+    /// or an explicit user reconnect (so a manual retry re-arms auto-reconnect).
+    private var bondGiveUp = BondRefusalGiveUp()
+    /// True while auto-reconnect is PAUSED by the #747 give-up. The disconnect-rescan and the
+    /// failed-connect backoff both consult this and skip scheduling a reconnect; a manual connect()/
+    /// disconnect() clears it via `bondGiveUp.reset()`. Distinct from `intentionalDisconnect` so a paused
+    /// link still reports its state honestly rather than looking like a user teardown.
+    private var autoReconnectPausedForBondLoop = false
     /// Multi-WHOOP stale-pin recovery (#52). Consecutive "Encryption/Authentication is insufficient" bond
     /// refusals on the CURRENTLY PINNED peripheral. A stale registry pin (pointing at a strap that bonds to
     /// the official app / isn't really here) makes `connect()` drop the strap that DOES bond and loop
@@ -693,6 +769,13 @@ public final class BLEManager: NSObject, ObservableObject {
     // MARK: Public API
     public func connect(model: WhoopModel = .persisted) {
         intentionalDisconnect = false
+        // #747/#750: a connect() that fires while the bond-loop pause is active can only be USER-initiated
+        // (the pause suppresses the auto-reconnect schedulers), so re-arm: clear the give-up streak + pause
+        // so this fresh attempt isn't immediately re-paused and the auto-reconnect works again if it bonds.
+        if autoReconnectPausedForBondLoop {
+            bondGiveUp.reset()
+            autoReconnectPausedForBondLoop = false
+        }
         // Connection test mode: stamp when this connect attempt began so didConnect can report the connect
         // latency. A plain Date() assignment, no behaviour change; only read behind the .connection gate.
         connectAttemptStartedAt = Date()
@@ -776,6 +859,8 @@ public final class BLEManager: NSObject, ObservableObject {
         // (manual) reconnect attempts the full R10/R11 stream again rather than inheriting old suspicion.
         marginalRadio.reset()
         postBondLoop.reset()   // #617: a clean teardown clears the bond-loop streak so a manual reconnect starts fresh
+        bondGiveUp.reset()     // #747/#750: a clean teardown clears the bond-refusal give-up + un-pauses auto-reconnect
+        autoReconnectPausedForBondLoop = false
         state.reconnectGuide = nil   // #711: a user-initiated teardown resolves the re-pair guide (no longer looping)
         readoptingTo = nil   // #52: a clean teardown abandons any in-flight pin handoff
         standardHRFallback = false
@@ -2389,7 +2474,16 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         resetCharacteristics()
         puffinRecorder.flush()   // persist any buffered puffin capture frames before reconnect
         Task { @MainActor in await collector?.flushStandardHR() }   // persist any buffered 0x2A37 HR
-        if !intentionalDisconnect {
+        if autoReconnectPausedForBondLoop {
+            // #747: the bond keeps being refused, so auto-reconnect is paused: we stop hammering a strap that
+            // can't bond (the epitaph + paused hint were already surfaced when the give-up tripped). The user
+            // re-arms it by tapping Connect. We do NOT schedule a rescan here.
+            log("Disconnected\(error.map { ": \($0.localizedDescription)" } ?? ""); auto-reconnect paused (strap keeps refusing to pair; tap Connect once it's free)")
+            if TestCentre.active(.connection) {
+                state.append(log: "connect down (uptime ends)", domain: .connection)
+                state.append(log: "reconnect paused=bondLoop (strap refusing bond)", domain: .connection)
+            }
+        } else if !intentionalDisconnect {
             log("Disconnected\(error.map { " — \($0.localizedDescription)" } ?? ""); rescanning in 3s")
             // Connection test mode: count + describe the involuntary reconnect churn, and mark the link
             // down for the uptime readout. Gated zero-cost (the .connection bool is read before any string
@@ -2451,7 +2545,8 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // edge of range — #414). The disconnect path reschedules a rescan, but didFailToConnect never
         // did, so the loop died here until a manual reconnect. Reschedule with a capped exponential
         // backoff (3, 6, 12, 24, 48, 60s…) so a strap that's genuinely out of range doesn't hammer BLE.
-        guard !intentionalDisconnect else { return }
+        // #747: don't reschedule while the bond-loop pause is active; the user must free the strap first.
+        guard !intentionalDisconnect, !autoReconnectPausedForBondLoop else { return }
         failedConnectAttempts += 1
         let delay = min(60.0, 3.0 * pow(2.0, Double(failedConnectAttempts - 1)))
         log("Reconnecting in \(Int(delay))s (attempt \(failedConnectAttempts))")
@@ -2644,6 +2739,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 } else {
                     log("WHOOP 5/MG: bond write refused (insufficient) — retrying once; will surface pairing-mode guidance if it persists (#78).")
                 }
+                // #747 / #750: feed the same refusal into the give-up tracker. Once it crosses the higher
+                // threshold (the pairing hint has had several cycles to be acted on), pause auto-reconnect so
+                // we stop hammering a strap that can't bond, write the one-line epitaph (opaque id only, no
+                // PII), and surface the honest paused hint. A genuine bond or a manual reconnect re-arms it.
+                if bondGiveUp.recordRefusal() {
+                    autoReconnectPausedForBondLoop = true
+                    let opaque = BondRefusalGiveUp.opaqueId(fromLocalUUID: peripheral.identifier.uuidString)
+                    log(BondRefusalGiveUp.epitaphLine(refusals: bondGiveUp.refusals, opaqueId: opaque))
+                    state.pairingHint = BondRefusalGiveUp.pausedHint()
+                    if TestCentre.active(.connection) {
+                        state.append(log: "bond gaveUp refusals=\(bondGiveUp.refusals) id=\(opaque) (auto-reconnect paused)", domain: .connection)
+                    }
+                }
             }
             // Multi-WHOOP stale-pin recovery (#52). When a stale registry pin points at a strap that keeps
             // refusing the encrypted bond ("Encryption/Authentication is insufficient") but a DIFFERENT
@@ -2677,6 +2785,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 bondedAt = Date()            // #617: start the bond→drop stopwatch for the bond-loop detector
                 state.pairingHint = nil
                 bondRefusalStreak = 0         // #78: a genuine bond resets the refusal streak
+                bondGiveUp.reset()            // #747/#750: a genuine bond clears the give-up + re-arms auto-reconnect
+                autoReconnectPausedForBondLoop = false
                 noteGenuineBond(of: peripheral)   // #52: this strap bonds fine; clears any pin-refusal streak
                 emitConnectionBondState("encryptedBond family=whoop5 (CLIENT_HELLO acked)")
                 log("WHOOP 5/MG: CLIENT_HELLO acked — link established; subscribing notify chars (experimental).")
