@@ -14,10 +14,19 @@ import StrandAnalytics
 /// nothing is attached. The field ids `log` and `what_happens` match bug_report.yml exactly.
 enum TestReportLink {
 
-    /// How many trailing lines of the redacted report.txt to prefill into the `log` textarea. ~150 lines
-    /// is enough to carry the recent diagnostic trace (the universal `dayOwner` line, the per-domain
-    /// emits) without making the URL so long a browser refuses it.
-    static let logTailLines = 150
+    /// How many trailing lines of the redacted report.txt to prefill into the `log` textarea. Kept SHORT
+    /// (the recent killer-trace tokens: the universal `dayOwner` line, the clock-drift line, the
+    /// per-domain emits) because the prefill rides INSIDE the URL: GitHub silently drops a new-issue
+    /// prefill past ~8 KB (the user lands on an empty form), so a long tail defeats the whole point. The
+    /// full trace travels in the attached/shared .zip, not the URL. A hard `maxURLLength` guard below
+    /// drops the `log` param entirely if the URL would still be too long.
+    static let logTailLines = 40
+
+    /// Hard ceiling on the composed new-issue URL. GitHub starts dropping/emptying the prefill near 8 KB;
+    /// we stay well under so the form always renders prefilled. If adding the `log` block would breach
+    /// this, the URL is rebuilt WITHOUT `log` (the .zip still carries the full trace), never truncated
+    /// mid-token into a broken <details> block.
+    static let maxURLLength = 6000
 
     /// Percent-encodes a query value with a strict allowed set: alphanumerics plus the few chars we
     /// want to stay literal (colon, dot, hyphen, underscore). Crucially the comma in "bug,test:id" is
@@ -84,9 +93,16 @@ enum TestReportLink {
         if let seed = whatHappensSeed, !seed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             query.append("what_happens=" + enc(seed))
         }
+        let base = "https://github.com/NoopApp/noop/issues/new?"
+        // Add the log block ONLY if the whole URL stays under the GitHub prefill ceiling. If it would
+        // breach maxURLLength, drop `log` entirely (never truncate it into a broken <details>); the full
+        // trace is in the attached .zip. The seed + id fields alone keep the body non-empty (#812).
         if let reportText, let block = logDetailsBlock(reportText: reportText) {
-            query.append("log=" + enc(block))
+            let withLog = query + ["log=" + enc(block)]
+            if (base + withLog.joined(separator: "&")).count <= maxURLLength {
+                query = withLog
+            }
         }
-        return URL(string: "https://github.com/NoopApp/noop/issues/new?" + query.joined(separator: "&"))
+        return URL(string: base + query.joined(separator: "&"))
     }
 }

@@ -29,6 +29,12 @@ final class TestCentreReport: ObservableObject {
     /// A one-line status banner the screen can show after a share fires (the app has no global toast).
     @Published var lastStatus: String?
 
+    /// M3 (#812): the redacted report.txt for the iOS "Copy report.txt" fallback. Set after a confirmed
+    /// share on the mobile path (TestReportFlow.Plan.offersCopyFallback); the screen surfaces a button
+    /// bound to it so a user who cannot attach the .zip can paste the <details> block straight into the
+    /// issue. nil on macOS / when there is nothing to copy, so the button stays hidden.
+    @Published var copyableReport: String?
+
     /// Build the redacted bundle for `mode` and stage it for review. Nothing leaves the device yet.
     func start(mode: TestMode, live: LiveState) {
         let entries = TestBundleAssembler.assemble(profile: mode.domain, live: live)
@@ -59,7 +65,9 @@ final class TestCentreReport: ObservableObject {
             gate: p.gate,
             entries: p.gate.entries,
             showToast: { [weak self] msg in self?.lastStatus = msg },
-            copyToPasteboard: { PlatformPasteboard.copy($0) },
+            // M3: prime the clipboard AND surface the report for a visible "Copy report.txt" button so the
+            // documented mobile fallback is reachable, not just silently on the pasteboard.
+            copyToPasteboard: { [weak self] text in PlatformPasteboard.copy(text); self?.copyableReport = text },
             whatHappensSeed: seed)
         pending = nil
     }

@@ -63,15 +63,30 @@ final class TestReportLinkTests: XCTestCase {
         // The field id is exactly `log` (bug_report.yml id: log) and `what_happens` (id: what_happens).
         XCTAssertTrue(s.contains("&log="))
         XCTAssertTrue(s.contains("what_happens="))
-        // The <details> wrapper and a recent line are present (percent-encoded). The tail is the LAST 150
-        // lines, so line 200 is in and line 1 is out.
+        // The <details> wrapper and a recent line are present (percent-encoded). The tail is the LAST
+        // logTailLines, so the newest line is in and line 1 is out.
         let decoded = url!.absoluteString.removingPercentEncoding ?? ""
         XCTAssertTrue(decoded.contains("<details>"))
         XCTAssertTrue(decoded.contains("line 200"))
-        XCTAssertFalse(decoded.contains("line 1\n"))      // line 1 trimmed off the 150-line tail
+        XCTAssertFalse(decoded.contains("line 1\n"))      // line 1 trimmed off the log tail
         XCTAssertTrue(decoded.contains("Saw no recovery score this morning"))
         // No em-dash leaks into the composed URL (hard rule).
         XCTAssertFalse(decoded.contains("\u{2014}"))
+    }
+
+    func testOversizedLogIsDroppedNotTruncated() {
+        // M2 (#812): a tail so long the URL would breach maxURLLength must DROP the log param entirely
+        // (never a truncated <details>), while keeping the short id fields + what_happens seed so the
+        // submitted body is still non-empty. The full trace travels in the attached .zip, not the URL.
+        let huge = (1...TestReportLink.logTailLines).map { _ in String(repeating: "x", count: 500) }
+            .joined(separator: "\n")
+        let url = TestReportLink.reportURL(
+            profile: .sleep, title: "x", version: "7.3.0", platform: "iOS", osVersion: "18.5",
+            reportText: huge, whatHappensSeed: "it broke")
+        let s = url!.absoluteString
+        XCTAssertFalse(s.contains("&log="))                              // dropped, not truncated
+        XCTAssertTrue(s.contains("what_happens="))                       // seed kept, body still non-empty
+        XCTAssertLessThanOrEqual(s.count, TestReportLink.maxURLLength)   // under the GitHub prefill ceiling
     }
 
     func testLogDetailsBlockEmptyTextYieldsNil() {

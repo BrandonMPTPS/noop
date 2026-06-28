@@ -20,10 +20,16 @@ import java.net.URLEncoder
  */
 object TestReportLink {
 
-    /** How many trailing lines of the redacted report.txt to prefill into the `log` textarea. ~150 lines
-     *  carries the recent diagnostic trace without making the URL so long a browser refuses it. Mirrors
-     *  the Swift logTailLines. */
-    const val LOG_TAIL_LINES = 150
+    /** How many trailing lines of the redacted report.txt to prefill into the `log` textarea. Kept SHORT
+     *  (the recent killer-trace tokens) because the prefill rides INSIDE the URL and GitHub silently drops
+     *  a new-issue prefill past ~8 KB (empty form); the full trace travels in the attached/shared .zip.
+     *  Mirrors the Swift logTailLines. */
+    const val LOG_TAIL_LINES = 40
+
+    /** Hard ceiling on the composed new-issue URL (GitHub empties the prefill near 8 KB; stay well under).
+     *  If adding the `log` block would breach this, the URL is rebuilt WITHOUT `log` rather than truncated
+     *  into a broken <details>. Mirrors the Swift maxURLLength. */
+    const val MAX_URL_LENGTH = 6000
 
     /** Percent-encode a query value the same way URLComponents does for the characters we emit.
      *  URLEncoder maps space to "+", so we fix it to "%20"; URLEncoder also encodes ":" to "%3A", but
@@ -80,12 +86,21 @@ object TestReportLink {
             add("os_version" to osVersion)
             add("test_profile" to profile.id)
             add("title" to "[${profile.id}] $title")
-            // CAPTURE-A: seed what_happens so the body is never empty, then prefill the log tail (#812).
+            // CAPTURE-A: seed what_happens so the body is never empty (#812).
             if (!whatHappensSeed.isNullOrBlank()) add("what_happens" to whatHappensSeed)
-            if (reportText != null) logDetailsBlock(reportText)?.let { add("log" to it) }
         }
-        val query = items.joinToString("&") { (k, v) -> "$k=${enc(v)}" }
-        return "https://github.com/NoopApp/noop/issues/new?$query"
+        val base = "https://github.com/NoopApp/noop/issues/new?"
+        fun render(list: List<Pair<String, String>>) = base + list.joinToString("&") { (k, v) -> "$k=${enc(v)}" }
+        // Add the log block ONLY if the whole URL stays under the GitHub prefill ceiling; otherwise drop it
+        // entirely (never truncate into a broken <details>) and rely on the attached/shared .zip (#812).
+        if (reportText != null) {
+            logDetailsBlock(reportText)?.let { block ->
+                val withLog = items + ("log" to block)
+                val rendered = render(withLog)
+                if (rendered.length <= MAX_URL_LENGTH) return rendered
+            }
+        }
+        return render(items)
     }
 
     /** The Uri for an ACTION_VIEW intent. Not unit-tested (Uri needs an Android runtime). */

@@ -179,6 +179,20 @@ struct TestCentreView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                // M3 (#812): the mobile copy fallback, now visible. If the user cannot attach the .zip in
+                // the GitHub composer, this pastes the redacted report into the clipboard to drop straight
+                // into the issue. Only appears after a confirmed share on the path that offers it.
+                if let reportText = report.copyableReport {
+                    Button {
+                        PlatformPasteboard.copy(reportText)
+                    } label: {
+                        Label("Copy report.txt", systemImage: "doc.on.clipboard")
+                            .font(StrandFont.subhead)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel("Copy the redacted report to the clipboard")
+                }
+
                 Divider().overlay(StrandPalette.hairline)
 
                 // Scheduled daily auto-export, the same ScheduledDebugExport reads/writes as the Settings

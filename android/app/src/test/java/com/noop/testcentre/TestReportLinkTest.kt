@@ -65,10 +65,25 @@ class TestReportLinkTest {
             version = "7.3.0", platform = "Android", osVersion = "15",
             reportText = report)
         assertTrue(s.contains("log="))
-        // The <details> wrapper and the LAST line are present; the FIRST line (beyond the 150 tail) is not.
+        // The <details> wrapper and the LAST line are present; the FIRST line (beyond the tail) is not.
         assertTrue(s.contains("%3Cdetails%3E")) // "<details>" encoded
         assertTrue(s.contains("line200"))
         assertFalse(s.contains("line1%0A")) // "line1\n" would only appear if the head leaked in
+    }
+
+    @Test
+    fun oversizedLogIsDroppedNotTruncated() {
+        // M2 (#812): a tail so long the URL would breach MAX_URL_LENGTH drops the log param entirely
+        // (never a truncated <details>), keeping the short id fields + seed so the body is still non-empty.
+        // Twin of the Swift testOversizedLogIsDroppedNotTruncated.
+        val huge = (1..TestReportLink.LOG_TAIL_LINES).joinToString("\n") { "x".repeat(500) }
+        val s = TestReportLink.reportUrlString(
+            profile = TestDomain.SLEEP, title = "x",
+            version = "7.3.0", platform = "Android", osVersion = "15",
+            reportText = huge, whatHappensSeed = "it broke")
+        assertFalse(s.contains("log=")) // dropped, not truncated
+        assertTrue(s.contains("what_happens=")) // seed kept, body still non-empty
+        assertTrue(s.length <= TestReportLink.MAX_URL_LENGTH) // under the GitHub prefill ceiling
     }
 
     @Test

@@ -108,13 +108,13 @@ enum FileExport {
     /// Present `UIActivityViewController` and, once it closes, best-effort remove the URLs in
     /// `cleanup` so staged exports don't accumulate in `temporaryDirectory` across runs.
     @MainActor
-    private static func present(activityItems: [Any], cleanup: [URL]) {
+    private static func present(activityItems: [Any], cleanup: [URL], completion: (() -> Void)? = nil) {
         guard let scene = UIApplication.shared.connectedScenes
                 .compactMap({ $0 as? UIWindowScene })
                 .first(where: { $0.activationState == .foregroundActive }) ?? UIApplication.shared
                 .connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
               let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
-                ?? scene.windows.first?.rootViewController else { return }
+                ?? scene.windows.first?.rootViewController else { completion?(); return }
         // Present from the TOP-MOST controller, not the root (#455). When the caller is itself inside a
         // SwiftUI sheet — e.g. the Trends report is shown via `.sheet` — root already has that sheet
         // presented, so `root.present(...)` is a no-op ("already presenting…") and the share sheet never
@@ -123,12 +123,16 @@ enum FileExport {
         var presenter = root
         while let next = presenter.presentedViewController, !next.isBeingDismissed { presenter = next }
         let vc = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
-        if !cleanup.isEmpty {
+        if !cleanup.isEmpty || completion != nil {
+            // Fires after the share sheet is dismissed (saved or cancelled). We clean up staged files and
+            // then run `completion` (M1/#812: the Test Centre report opens its prefilled issue here, once
+            // the share sheet is gone, so the in-app SafariVC presents with nothing else on screen).
             vc.completionWithItemsHandler = { _, _, _, _ in
                 let fm = FileManager.default
                 for url in cleanup where fm.fileExists(atPath: url.path) {
                     try? fm.removeItem(at: url)
                 }
+                completion?()
             }
         }
         // iPad: anchor the popover to the screen centre to avoid a crash.
@@ -172,9 +176,10 @@ enum FileExport {
     /// EVERY entry must already be redacted by the caller (section 5.3); the 20 MB cap (section 5.4) is the
     /// assembler's job before it calls here. Returns the staged / saved zip URL, nil on cancel or failure.
     @MainActor @discardableResult
-    static func exportBundle(entries: [BundleEntry], suggestedName: String) -> URL? {
+    static func exportBundle(entries: [BundleEntry], suggestedName: String,
+                             completion: (() -> Void)? = nil) -> URL? {
         let base = suggestedName.hasSuffix(".zip") ? String(suggestedName.dropLast(4)) : suggestedName
-        guard let staged = zipData(entries: entries, baseName: base) else { return nil }
+        guard let staged = zipData(entries: entries, baseName: base) else { completion?(); return nil }
         #if os(macOS)
         let panel = NSSavePanel()
         panel.nameFieldStringValue = suggestedName
@@ -194,7 +199,7 @@ enum FileExport {
         try? fm.removeItem(at: staged)
         return dest
         #else
-        present(activityItems: [staged], cleanup: [staged])
+        present(activityItems: [staged], cleanup: [staged], completion: completion)
         return staged
         #endif
     }
