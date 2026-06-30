@@ -77,13 +77,32 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
     var window by remember { mutableStateOf<LongRange?>(null) }
     val visible = window ?: dayBounds
 
-    // #597 — one-shot: open on the most recent day that has data (lexicographic max of the yyyy-MM-dd keys
-    // is chronological), so a just-synced-history user lands on real data instead of an empty today.
+    // #597 / #863 , one-shot: open on the most recent day that has DATA, so a just-synced-history user
+    // (and a calibrating 4.0 that has banked raw HR but no scored DailyMetric yet) lands on real data
+    // instead of an empty today. The latest SCORED day (DailyMetric) is the first choice; when there is
+    // none yet, we fall back to the most recent day that has raw HR (max hrSample.ts for the strap), so a
+    // calibrating 4.0 still opens on the day its banked HR lives rather than a blank today (#863). Mirrors
+    // iOS landOnLatestDayIfNeeded, which already keys on the raw-HR union via repo.latestDataDayStart.
     LaunchedEffect(recentDays) {
-        if (!didLand && recentDays.isNotEmpty()) {
-            didLand = true
-            val latest = recentDays.maxByOrNull { it.day }?.day?.let { dayKeyToEpochSec(it) }
-            if (latest != null && latest < dayStartSec) { dayStartSec = latest; window = null }
+        if (!didLand) {
+            // Only mark the one-shot done once we actually have something to key on , so a first compose
+            // that runs before recentDays loads doesn't burn the jump and strand a scored user on today.
+            val latestScoredKey = recentDays.maxByOrNull { it.day }?.day
+            val latestRawHrTs = if (latestScoredKey == null) {
+                runCatching { vm.repo.latestHrSampleTs(deviceId) }.getOrNull()
+            } else {
+                null
+            }
+            if (latestScoredKey != null || latestRawHrTs != null) {
+                didLand = true
+                val target = landTargetDayStart(
+                    currentDayStart = dayStartSec,
+                    latestScoredDayKey = latestScoredKey,
+                    latestRawHrTs = latestRawHrTs,
+                    dayStartOf = ::epochSecToLocalDayStart,
+                )
+                if (target != null) { dayStartSec = target; window = null }
+            }
         }
     }
 
@@ -356,6 +375,39 @@ private fun dayKeyToEpochSec(day: String): Long? = runCatching {
     sdf.timeZone = java.util.TimeZone.getDefault()
     (sdf.parse(day)?.time ?: return null) / 1000
 }.getOrNull()
+
+/** An arbitrary epoch-second to its LOCAL midnight epoch-seconds (the same clamp `todayStart` uses), so a
+ *  raw hrSample.ts can be mapped to the day it belongs to for the #863 raw-HR land fallback. */
+private fun epochSecToLocalDayStart(ts: Long): Long {
+    val cal = Calendar.getInstance().apply {
+        timeInMillis = ts * 1000
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }
+    return cal.timeInMillis / 1000
+}
+
+/**
+ * PURE land-on-day decision for the Deep Timeline's one-shot open (#597 / #863). Given the day currently
+ * shown, the latest SCORED day key (DailyMetric, yyyy-MM-dd) and the latest RAW HR sample timestamp, return
+ * the day-start to land on, or null to stay put.
+ *
+ * Preference order: a scored day wins (the historical #597 behaviour); when there is no scored day yet, fall
+ * back to the day that holds the most recent raw HR (the calibrating-4.0 case , banked HR, no DailyMetric
+ * yet, #863). Only jumps to a day STRICTLY EARLIER than where we already are, so it can't fight a forward
+ * step or land us "ahead" of today. [dayStartOf] maps an epoch-second to its local midnight (injected so the
+ * decision is testable without a Calendar/zone).
+ */
+internal fun landTargetDayStart(
+    currentDayStart: Long,
+    latestScoredDayKey: String?,
+    latestRawHrTs: Long?,
+    dayStartOf: (Long) -> Long,
+): Long? {
+    val target = latestScoredDayKey?.let { dayKeyToEpochSec(it) }
+        ?: latestRawHrTs?.let { dayStartOf(it) }
+    return if (target != null && target < currentDayStart) target else null
+}
 
 /** "Today" / "Yesterday" / "Wed 18 Jun" label for the Deep Timeline day stepper (#597). */
 private fun dayLabel(dayStartSec: Long, todayStart: Long): String = when (dayStartSec) {

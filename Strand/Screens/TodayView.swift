@@ -2489,8 +2489,28 @@ struct TodayView: View {
         if let s = restScore {
             GlowRing(fraction: s / 100, value: s, format: { "\(Int($0.rounded()))" },
                      color: StrandPalette.restColor, diameter: diameter, lineWidth: diameter * 0.10)
+        } else if displayDay?.recovery != nil {
+            // #898: an aggregate-import user (a daily HRV/RHR import, no in-bed session) gets a Charge from
+            // WatchRecovery but NO sleep_performance, so Rest read a bare "No data" next to a lit Charge ,
+            // reading as broken. When a Charge IS present for the day but Rest is absent, say WHY honestly
+            // instead. We do NOT fabricate a Rest number , an aggregate genuinely has no scored night. A day
+            // with no Charge either (truly empty) still falls through to "No data". Mirrors Android.
+            emptyHeroRing(diameter: diameter) { ringNeedsTrackedNight() }
         } else {
             emptyHeroRing(diameter: diameter) { ringNoData(diameter: diameter) }
+        }
+    }
+
+    /// #898: the Rest ring's overlay when a Charge exists for the day but there's no scored sleep (the
+    /// aggregate-import case). Says why Rest is blank instead of a bare "No data", without fabricating a
+    /// number. Mirrors Android's RingNeedsTrackedNight.
+    @ViewBuilder
+    private func ringNeedsTrackedNight() -> some View {
+        VStack(spacing: 3) {
+            Text("Calibrating").font(StrandFont.headline).foregroundStyle(StrandPalette.textTertiary)
+                .lineLimit(1).minimumScaleFactor(0.7).fixedSize()
+            Text("needs a tracked night").font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                .lineLimit(1).minimumScaleFactor(0.6).fixedSize()
         }
     }
 
@@ -2587,8 +2607,9 @@ struct TodayView: View {
 
     /// A full-width 24-hour heart-rate trend, plotted from 5-minute bucket means of the strap's
     /// `hrSample` history (offloaded even while the app was closed, so the day reads continuously).
-    /// Hidden until there are at least two buckets — a strap-only user with no wear today sees nothing
-    /// rather than an empty axis. Mirrored on Android (TodayScreen.kt HeartRateTrendCard).
+    /// When there are fewer than two buckets it shows an explicit calibrating/empty card rather than
+    /// vanishing , a sparse day used to render NOTHING, which read as a frozen graph (#863). Mirrored on
+    /// Android (TodayScreen.kt HeartRateTrendCard).
     @ViewBuilder
     private var heartRateTrendSection: some View {
         if hrPoints.count > 1 {
@@ -2620,6 +2641,30 @@ struct TodayView: View {
                         ("Avg", "\(Int((v.reduce(0, +) / Double(v.count)).rounded()))"),
                         ("Max", "\(Int((v.max() ?? 0).rounded()))"),
                     ])
+                }
+            }
+        } else {
+            // #863: an empty / single-bucket day. A calibrating 4.0 banks HR slowly, so an empty curve early
+            // on isn't a fault , say so explicitly instead of leaving a blank where the chart was (which read
+            // as the graph freezing). We don't silently swap in another day's curve here; the honest empty
+            // state is the parity-matched fix. Mirrors the Android HeartRateTrendCard empty branch.
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Heart Rate", overline: "\(selectedDayOverline)")
+                ChartCard(
+                    title: "Beats per minute",
+                    subtitle: selectedDayOffset == 0
+                        ? "Calibrating , no heart rate banked yet today"
+                        : "No heart rate for this day",
+                    trailing: nil,
+                    tint: StrandPalette.metricRose
+                ) {
+                    Text(selectedDayOffset == 0
+                        ? "Your curve fills in as the strap offloads its history."
+                        : "Step back to a day the strap was worn.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .multilineTextAlignment(.center)
                 }
             }
         }

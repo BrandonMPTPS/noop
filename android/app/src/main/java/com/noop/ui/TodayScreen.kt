@@ -1923,7 +1923,15 @@ private fun ScoreHeroRow(
                             lineWidth = ring * 0.10f,
                             showsLabel = restScore != null,
                         )
-                        if (restScore == null) RingNoData()
+                        // #898: an aggregate-import user (a daily HRV/RHR import, no in-bed session) gets a
+                        // Charge from WatchRecovery but NO sleep_performance, so Rest used to read a bare
+                        // "No Data" next to a lit Charge , reading as broken. When a Charge IS present for the
+                        // day but Rest is absent, say WHY honestly ("Needs a tracked night") instead. We do
+                        // NOT fabricate a Rest number , an aggregate genuinely has no scored night. A day with
+                        // no Charge either (truly empty) keeps the plain "No Data". Mirrors iOS restRing.
+                        if (restScore == null) {
+                            if (recovery != null) RingNeedsTrackedNight() else RingNoData()
+                        }
                     }
                 }
             }
@@ -2165,6 +2173,22 @@ private fun RingEmptyOverlay(
 @Composable
 private fun RingNoData() {
     Text(NO_DATA, style = NoopType.headline, color = Palette.textTertiary, maxLines = 1)
+}
+
+/** #898: the Rest ring's overlay when a Charge exists for the day but there's no scored sleep (the
+ *  aggregate-import case , a daily HRV/RHR import carries no in-bed session). Says WHY Rest is blank
+ *  instead of a bare "No Data", without fabricating a number. Mirrors iOS restRing's needs-a-night branch. */
+@Composable
+private fun RingNeedsTrackedNight() {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("Calibrating", style = NoopType.headline, color = Palette.textTertiary, maxLines = 1)
+        Text(
+            "needs a tracked night",
+            style = NoopType.footnote,
+            color = Palette.textSecondary,
+            maxLines = 1,
+        )
+    }
 }
 
 // MARK: - Hero vitals metric rows — HRV / Resting HR / Respiratory, re-homed below the ring hero
@@ -3793,19 +3817,41 @@ private fun HeartRateTrendCard(
                 .filter { it.startTs <= end && it.endTs >= start }
         }.getOrDefault(emptyList())
     }
-    if (buckets.size < 2) return
+    val selectedLabel = when (selectedDay) {
+        today -> "Today"
+        today.minusDays(1) -> "Yesterday"
+        else -> selectedDay.format(DateTimeFormatter.ofPattern("d MMM", Locale.US))
+    }
+
+    // #863: a sparse/empty selected day used to `return` here and render NOTHING, which read as "the graph
+    // froze". Show an explicit calibrating/empty card instead so the user knows the curve is still filling in
+    // (a calibrating 4.0 banks HR slowly) rather than that the screen broke. We intentionally do NOT silently
+    // swap in a different day's curve here (that day-swap reload behaviour was rejected in #605, see above);
+    // the honest empty state is the parity-matched fix. Mirrors the iOS Today HR card's empty branch.
+    if (buckets.size < 2) {
+        SectionHeader("Heart Rate", overline = selectedLabel)
+        NoopCard {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Overline("Beats per minute")
+                Text(
+                    if (selectedDay == today) {
+                        "Calibrating , no heart rate banked yet today. Your curve fills in as the strap offloads."
+                    } else {
+                        "No heart rate for this day. Step back to a day the strap was worn."
+                    },
+                    style = NoopType.footnote,
+                    color = Palette.textTertiary,
+                )
+            }
+        }
+        return
+    }
 
     val bpm = remember(buckets) { buckets.map { it.avgBpm } }
     val latest = bpm.last().roundToInt()
     val min = bpm.min().roundToInt()
     val max = bpm.max().roundToInt()
     val avg = bpm.average().roundToInt()
-
-    val selectedLabel = when (selectedDay) {
-        today -> "Today"
-        today.minusDays(1) -> "Yesterday"
-        else -> selectedDay.format(DateTimeFormatter.ofPattern("d MMM", Locale.US))
-    }
 
     SectionHeader("Heart Rate", overline = selectedLabel)
     NoopCard {
